@@ -15,6 +15,7 @@ import { Account, QuickTransaction } from '../data/models';
 const formatCurrency = (symbol: string, value: number) =>
   `${symbol}${value.toFixed(2)}`;
 const chartHeight = 160;
+const chartLabelHeight = 18;
 
 const getMonthIndex = (date: Date) => date.getFullYear() * 12 + date.getMonth();
 
@@ -158,13 +159,17 @@ export default function AnalysisScreen({
 
   const incomeSeries = analysis.dayBuckets.map(entry => entry.income);
   const expenseSeries = analysis.dayBuckets.map(entry => entry.expense);
-  const chartWidth = Math.max(0, width - 40);
+  const chartPaddingX = 14;
+  const chartWidth = Math.max(0, width - 40 - chartPaddingX * 2);
+  const svgHeight = chartHeight + chartLabelHeight;
   const maxDaily = Math.max(1, analysis.maxDaily);
   const pointCount = analysis.dayBuckets.length;
 
   const getPoints = (values: number[]) =>
     values.map((value, index) => ({
-      x: pointCount <= 1 ? 0 : (index / (pointCount - 1)) * chartWidth,
+      x:
+        chartPaddingX +
+        (pointCount <= 1 ? 0 : (index / (pointCount - 1)) * chartWidth),
       y: chartHeight - (value / maxDaily) * chartHeight,
       value,
     }));
@@ -172,42 +177,38 @@ export default function AnalysisScreen({
   const incomePoints = getPoints(incomeSeries);
   const expensePoints = getPoints(expenseSeries);
   const clampY = (value: number) => Math.min(chartHeight - 10, Math.max(10, value));
-  const clampX = (value: number) => Math.min(chartWidth - 6, Math.max(6, value));
+  const clampX = (value: number) =>
+    Math.min(chartPaddingX + chartWidth - 6, Math.max(chartPaddingX + 6, value));
 
-  const buildSegments = (points: { x: number; y: number; value: number }[]) => {
-    const segments: Array<typeof points> = [];
-    let current: typeof points = [];
-    points.forEach(point => {
-      if (point.value > 0) {
-        current.push({ ...point, y: clampY(point.y) });
-      } else if (current.length) {
-        segments.push(current);
-        current = [];
-      }
-    });
-    if (current.length) segments.push(current);
-    return segments;
-  };
-
-  const incomeSegments = buildSegments(incomePoints);
-  const expenseSegments = buildSegments(expensePoints);
-  const incomeDisplayPoints = incomeSegments.flat();
-  const expenseDisplayPoints = expenseSegments.flat();
+  const incomeLinePoints = incomePoints.map(point => ({
+    ...point,
+    y: clampY(point.y),
+  }));
+  const expenseLinePoints = expensePoints.map(point => ({
+    ...point,
+    y: clampY(point.y),
+  }));
+  const incomeDisplayPoints = incomeLinePoints.filter(point => point.value > 0);
+  const expenseDisplayPoints = expenseLinePoints.filter(point => point.value > 0);
   const labelPoints = analysis.dayBuckets
     .map((entry, index) => ({
       day: entry.day,
-      x: clampX(incomePoints[index]?.x ?? 0),
+      x: clampX(incomePoints[index]?.x ?? chartPaddingX),
       hasData: entry.income > 0 || entry.expense > 0,
     }))
-    .filter(entry => entry.hasData);
+    .filter(entry => entry.hasData)
+    .map(entry => ({
+      ...entry,
+      x: entry.day === 1 ? entry.x + 4 : entry.x,
+    }));
 
   const lineGenerator = d3Line<{ x: number; y: number }>()
     .x((point: { x: number; y: number }) => point.x)
     .y((point: { x: number; y: number }) => point.y)
     .curve(curveMonotoneX);
 
-  const incomePaths = incomeSegments.map(segment => lineGenerator(segment) ?? '');
-  const expensePaths = expenseSegments.map(segment => lineGenerator(segment) ?? '');
+  const incomePath = lineGenerator(incomeLinePoints) ?? '';
+  const expensePath = lineGenerator(expenseLinePoints) ?? '';
 
   return (
     <View style={styles.container}>
@@ -308,25 +309,19 @@ export default function AnalysisScreen({
         <View style={styles.section}>
           <Text style={styles.sectionTitle}>Daily Income vs Expense</Text>
           <View style={styles.lineChartCard}>
-            <Svg width={chartWidth} height={chartHeight}>
-              {incomePaths.map((path, index) => (
-                <Path
-                  key={`income-path-${index}`}
-                  d={path}
-                  stroke="#6EE7B7"
-                  strokeWidth={2}
-                  fill="none"
-                />
-              ))}
-              {expensePaths.map((path, index) => (
-                <Path
-                  key={`expense-path-${index}`}
-                  d={path}
-                  stroke="#FF8A80"
-                  strokeWidth={2}
-                  fill="none"
-                />
-              ))}
+            <Svg width={chartWidth + chartPaddingX * 2} height={svgHeight}>
+              <Path
+                d={incomePath}
+                stroke="#6EE7B7"
+                strokeWidth={2}
+                fill="none"
+              />
+              <Path
+                d={expensePath}
+                stroke="#FF8A80"
+                strokeWidth={2}
+                fill="none"
+              />
               {incomeDisplayPoints.map((point, index) => (
                 <Circle
                   key={`income-${index}`}
@@ -369,17 +364,19 @@ export default function AnalysisScreen({
                   {`${currencySymbol}${Math.round(point.value)}`}
                 </SvgText>
               ))}
+              {labelPoints.map(point => (
+                <SvgText
+                  key={`label-${point.day}`}
+                  x={point.x}
+                  y={chartHeight + 12}
+                  fill="rgba(255,255,255,0.6)"
+                  fontSize={9}
+                  textAnchor="middle"
+                >
+                  {point.day}
+                </SvgText>
+              ))}
             </Svg>
-          </View>
-          <View style={styles.dateLabelRow}>
-            {labelPoints.map(point => (
-              <Text
-                key={`label-${point.day}`}
-                style={[styles.dateLabel, { left: point.x - 6 }]}
-              >
-                {point.day}
-              </Text>
-            ))}
           </View>
           <View style={styles.lineLegendRow}>
             <View style={styles.legendItem}>
@@ -647,17 +644,7 @@ const styles = StyleSheet.create({
     backgroundColor: 'rgba(255,255,255,0.06)',
     borderRadius: 16,
     padding: 12,
-    height: chartHeight,
-  },
-  dateLabelRow: {
-    position: 'relative',
-    height: 14,
-    marginTop: 6,
-  },
-  dateLabel: {
-    position: 'absolute',
-    fontSize: 9,
-    color: 'rgba(255,255,255,0.6)',
+    height: chartHeight + chartLabelHeight,
   },
   lineLegendRow: {
     flexDirection: 'row',
