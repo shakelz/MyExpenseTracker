@@ -88,7 +88,8 @@ class SystemBubbleService : Service() {
 
     val bg = GradientDrawable().apply {
       shape = GradientDrawable.OVAL
-      setColor(0xFF4E7CFF.toInt())
+      setColor(0xFFFFFFFF.toInt())
+      setStroke(dpToPx(1f), 0x22000000)
     }
     bubble.background = bg
     bubble.setImageResource(R.drawable.ic_fiscus_app)
@@ -136,7 +137,7 @@ class SystemBubbleService : Service() {
   }
 
   private fun handleBubbleClick() {
-    moveBubbleToBottomEdge()
+    moveBubbleToCenter()
     showForm()
   }
 
@@ -145,6 +146,10 @@ class SystemBubbleService : Service() {
     val wm = windowManager ?: return
 
     val root = FrameLayout(this)
+    root.layoutParams = FrameLayout.LayoutParams(
+      FrameLayout.LayoutParams.MATCH_PARENT,
+      FrameLayout.LayoutParams.MATCH_PARENT
+    )
     root.setBackgroundColor(0x00000000)
 
     val card = LinearLayout(this).apply {
@@ -157,6 +162,18 @@ class SystemBubbleService : Service() {
       }
       elevation = dpToPx(10f).toFloat()
     }
+
+    val dragHandle = View(this).apply {
+      background = GradientDrawable().apply {
+        cornerRadius = dpToPx(3f).toFloat()
+        setColor(0x66FFFFFF)
+      }
+    }
+    val dragParams = LinearLayout.LayoutParams(dpToPx(44f), dpToPx(6f)).apply {
+      gravity = Gravity.CENTER_HORIZONTAL
+      bottomMargin = dpToPx(10f)
+    }
+    card.addView(dragHandle, dragParams)
 
     fun createPill(textValue: String, bgColor: Int, textColor: Int): TextView {
       return TextView(this).apply {
@@ -185,12 +202,12 @@ class SystemBubbleService : Service() {
 
     val currencySymbol = getCurrencySymbol()
     val amountLabel = TextView(this).apply {
-      text = "Total Income (${currencySymbol})"
+      text = "Total Expense (${currencySymbol})"
       textSize = 12f
       setTextColor(0xFFB9BED6.toInt())
     }
 
-    var selectedType = "income"
+    var selectedType = "expense"
     val updateTypeUi = {
       val incomeSelected = selectedType == "income"
       incomeToggle.background = GradientDrawable().apply {
@@ -415,15 +432,49 @@ class SystemBubbleService : Service() {
 
     updateTypeUi()
 
+    var dragStartX = 0f
+    var dragStartY = 0f
+    var cardStartX = 0f
+    var cardStartY = 0f
+    dragHandle.setOnTouchListener { _, event ->
+      when (event.action) {
+        MotionEvent.ACTION_DOWN -> {
+          dragStartX = event.rawX
+          dragStartY = event.rawY
+          cardStartX = card.translationX
+          cardStartY = card.translationY
+          true
+        }
+        MotionEvent.ACTION_MOVE -> {
+          val dx = event.rawX - dragStartX
+          val dy = event.rawY - dragStartY
+          val nextX = cardStartX + dx
+          val nextY = cardStartY + dy
+          val maxX = ((root.width - card.width) / 2).toFloat().coerceAtLeast(0f)
+          val maxY = ((root.height - card.height) / 2).toFloat().coerceAtLeast(0f)
+          card.translationX = nextX.coerceIn(-maxX, maxX)
+          card.translationY = nextY.coerceIn(-maxY, maxY)
+          true
+        }
+        else -> false
+      }
+    }
+
     val cardParams = FrameLayout.LayoutParams(
       dpToPx(320f),
       FrameLayout.LayoutParams.WRAP_CONTENT
     ).apply {
-      gravity = Gravity.BOTTOM or Gravity.CENTER_HORIZONTAL
-      bottomMargin = dpToPx(24f) + bubbleSizePx
+      gravity = Gravity.CENTER
     }
 
     root.addView(card, cardParams)
+    card.translationY = -dpToPx(24f).toFloat()
+    card.alpha = 0f
+    card.animate()
+      .translationY(0f)
+      .alpha(1f)
+      .setDuration(180)
+      .start()
 
     root.setOnTouchListener { _, event ->
       if (event.action == MotionEvent.ACTION_DOWN) {
@@ -448,11 +499,13 @@ class SystemBubbleService : Service() {
       WindowManager.LayoutParams.MATCH_PARENT,
       WindowManager.LayoutParams.MATCH_PARENT,
       type,
-      WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN,
+      WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN or
+        WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS or
+        WindowManager.LayoutParams.FLAG_NOT_TOUCH_MODAL,
       PixelFormat.TRANSLUCENT
     ).apply {
       gravity = Gravity.TOP or Gravity.START
-      softInputMode = WindowManager.LayoutParams.SOFT_INPUT_ADJUST_RESIZE
+      softInputMode = WindowManager.LayoutParams.SOFT_INPUT_ADJUST_NOTHING
     }
 
     wm.addView(root, params)
@@ -652,20 +705,21 @@ class SystemBubbleService : Service() {
     lastBubbleY = params.y
   }
 
-  private fun moveBubbleToBottomEdge() {
+  private fun moveBubbleToCenter() {
     val params = layoutParams ?: return
     val metrics = resources.displayMetrics
     val screenWidth = metrics.widthPixels
     val screenHeight = metrics.heightPixels
-    val edgeX = if (params.x + bubbleSizePx / 2 < screenWidth / 2) 0
-    else screenWidth - bubbleSizePx
-    val targetY = (screenHeight - bubbleSizePx - dpToPx(24f)).coerceAtLeast(0)
-    params.x = edgeX
+    val targetX = (screenWidth - bubbleSizePx) / 2
+    val targetY = (screenHeight - bubbleSizePx) / 2
+    params.x = targetX
     params.y = targetY
     windowManager?.updateViewLayout(bubbleView, params)
     lastBubbleX = params.x
     lastBubbleY = params.y
   }
+
+  // keep bubble on the nearest side edge
 
   private fun getCurrencySymbol(): String {
     val prefs = getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)

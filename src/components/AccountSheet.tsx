@@ -17,6 +17,8 @@ type AccountSheetProps = {
   visible: boolean;
   onClose: () => void;
   onSubmit: (account: Account) => void;
+  onDelete?: (account: Account) => void;
+  initialValue?: Account | null;
 };
 
 const ACCOUNT_TYPES: AccountType[] = ['bank', 'cash', 'wallet'];
@@ -25,6 +27,8 @@ export default function AccountSheet({
   visible,
   onClose,
   onSubmit,
+  onDelete,
+  initialValue,
 }: AccountSheetProps) {
   const { height } = useWindowDimensions();
   const translateY = useMemo(() => new Animated.Value(height), [height]);
@@ -50,6 +54,21 @@ export default function AccountSheet({
     }
   }, [height, translateY, visible]);
 
+  useEffect(() => {
+    if (!visible) {
+      return;
+    }
+    if (initialValue) {
+      setName(initialValue.name);
+      setBalance(String(initialValue.balance));
+      setType(initialValue.type);
+      return;
+    }
+    setName('');
+    setBalance('');
+    setType('bank');
+  }, [initialValue, visible]);
+
   const handleSubmit = () => {
     if (!name.trim()) {
       return;
@@ -57,7 +76,7 @@ export default function AccountSheet({
     const amount = Number(balance);
     const nextBalance = Number.isNaN(amount) ? 0 : amount;
     onSubmit({
-      id: String(Date.now()),
+      id: initialValue?.id ?? String(Date.now()),
       name: name.trim(),
       type,
       balance: nextBalance,
@@ -66,6 +85,13 @@ export default function AccountSheet({
     setBalance('');
     setType('bank');
     onClose();
+  };
+
+  const handleDelete = () => {
+    if (initialValue && onDelete) {
+      onDelete(initialValue);
+      onClose();
+    }
   };
 
   if (!visible) {
@@ -82,7 +108,9 @@ export default function AccountSheet({
           style={[styles.sheet, { transform: [{ translateY }] }]}
         >
           <View style={styles.handle} />
-          <Text style={styles.title}>Add account</Text>
+          <Text style={styles.title}>
+            {initialValue ? 'Update account' : 'Add account'}
+          </Text>
           <Text style={styles.label}>Account name</Text>
           <TextInput
             value={name}
@@ -123,8 +151,15 @@ export default function AccountSheet({
             style={styles.input}
           />
           <Pressable style={styles.submitButton} onPress={handleSubmit}>
-            <Text style={styles.submitText}>Save account</Text>
+            <Text style={styles.submitText}>
+              {initialValue ? 'Update account' : 'Save account'}
+            </Text>
           </Pressable>
+          {initialValue && onDelete ? (
+            <Pressable style={styles.deleteButton} onPress={handleDelete}>
+              <Text style={styles.deleteText}>Delete account</Text>
+            </Pressable>
+          ) : null}
         </Animated.View>
       </KeyboardAvoidingView>
     </View>
@@ -215,5 +250,19 @@ const styles = StyleSheet.create({
     color: '#FFFFFF',
     fontWeight: '700',
     fontSize: 15,
+  },
+  deleteButton: {
+    marginTop: 10,
+    paddingVertical: 12,
+    borderRadius: 14,
+    borderWidth: 1,
+    borderColor: '#F2B8B8',
+    alignItems: 'center',
+    backgroundColor: '#FFF5F5',
+  },
+  deleteText: {
+    color: '#D64545',
+    fontWeight: '700',
+    fontSize: 14,
   },
 });

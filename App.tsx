@@ -40,10 +40,15 @@ import {
 import {
   createLocalAccount,
   createLocalTransaction,
+  deleteLocalAccount,
+  deleteLocalTransaction,
   fetchLocalAccounts,
   fetchLocalTransactions,
+  getLocalSetting,
   initLocalDb,
   seedLocalDataIfEmpty,
+  setLocalSetting,
+  updateLocalAccount,
   updateLocalTransaction,
 } from './src/data/localDb';
 import { EXPENSE_CATEGORIES, INCOME_CATEGORIES } from './src/data/categories';
@@ -72,6 +77,7 @@ function AppContent() {
   const [editingTransaction, setEditingTransaction] = useState<
     QuickTransaction | null
   >(null);
+  const [editingAccount, setEditingAccount] = useState<Account | null>(null);
   const [hasOverlayPermission, setHasOverlayPermission] = useState(false);
   const [bubbleEnabled, setBubbleEnabled] = useState(false);
 
@@ -202,6 +208,15 @@ function AppContent() {
     initLocalDb()
       .then(async () => {
         await seedLocalDataIfEmpty();
+        const savedCountryCode = await getLocalSetting('country_code');
+        if (savedCountryCode) {
+          const savedCountry = countries.find(
+            item => item.code === savedCountryCode,
+          );
+          if (savedCountry) {
+            setSelectedCountry(savedCountry);
+          }
+        }
         const [accountList, transactionList] = await Promise.all([
           fetchLocalAccounts(),
           fetchLocalTransactions(),
@@ -210,7 +225,16 @@ function AppContent() {
         setTransactions(transactionList);
       })
       .catch(() => null);
-  }, []);
+  }, [countries]);
+
+  const handleSelectCountry = async (country: CountryOption) => {
+    setSelectedCountry(country);
+    try {
+      await setLocalSetting('country_code', country.code);
+    } catch {
+      // ignore db failures
+    }
+  };
 
   const summary = useMemo(() => {
     return currentMonthTransactions.reduce(
@@ -321,6 +345,26 @@ function AppContent() {
   };
 
   const handleAddAccount = async (account: Account) => {
+    if (editingAccount) {
+      setAccounts(current =>
+        current.map(item => (item.id === account.id ? account : item)),
+      );
+      try {
+        const updated = await updateLocalAccount(account.id, {
+          name: account.name,
+          type: account.type,
+          balance: account.balance,
+        });
+        setAccounts(current =>
+          current.map(item => (item.id === updated.id ? updated : item)),
+        );
+      } catch {
+        // keep local entry
+      }
+      setEditingAccount(null);
+      return;
+    }
+
     setAccounts(current => [account, ...current]);
     try {
       const created = await createLocalAccount({
@@ -334,6 +378,35 @@ function AppContent() {
     } catch {
       // keep local entry
     }
+  };
+
+  const handleDeleteAccount = async (account: Account) => {
+    setAccounts(current => current.filter(item => item.id !== account.id));
+    setTransactions(current =>
+      current.filter(item => {
+        if (item.accountId && item.accountId === account.id) {
+          return false;
+        }
+        if (item.accountName && item.accountType) {
+          return !(
+            item.accountName.toLowerCase() === account.name.toLowerCase() &&
+            item.accountType === account.type
+          );
+        }
+        return true;
+      }),
+    );
+    try {
+      const result = await deleteLocalAccount(account.id);
+      if (result.transactionIds.length) {
+        setTransactions(current =>
+          current.filter(item => !result.transactionIds.includes(item.id)),
+        );
+      }
+    } catch {
+      // ignore db failures
+    }
+    setEditingAccount(null);
   };
 
   const handleSubmitTransaction = async (entry: QuickTransaction) => {
@@ -430,6 +503,40 @@ function AppContent() {
     setEditingTransaction(null);
   };
 
+  const handleDeleteTransaction = async (entry: QuickTransaction) => {
+    setTransactions(current => current.filter(item => item.id !== entry.id));
+    setAccounts(current => {
+      let updated = [...current];
+      const delta = entry.type === 'income' ? -entry.amount : entry.amount;
+      const accountId =
+        entry.accountId ??
+        findAccountIdByDetails(updated, entry.accountName, entry.accountType);
+      if (accountId) {
+        updated = updated.map(account =>
+          account.id === accountId
+            ? { ...account, balance: account.balance + delta }
+            : account,
+        );
+      }
+      return updated;
+    });
+
+    try {
+      const result = await deleteLocalTransaction(entry.id);
+      if (result.account) {
+        setAccounts(current =>
+          current.map(item =>
+            item.id === result.account!.id ? result.account! : item,
+          ),
+        );
+      }
+    } catch {
+      // ignore db failures
+    }
+    setEditingTransaction(null);
+    setQuickAddOpen(false);
+  };
+
   return (
     <View style={styles.container}>
       {activeScreen === 'analysis' ? (
@@ -443,7 +550,7 @@ function AppContent() {
         <SettingsScreen
           countries={countries}
           selectedCountry={selectedCountry}
-          onSelectCountry={setSelectedCountry}
+          onSelectCountry={handleSelectCountry}
           bubbleEnabled={bubbleEnabled}
           onToggleBubble={handleToggleBubble}
         />
@@ -501,7 +608,10 @@ function AppContent() {
 
                 <View style={styles.sectionHeader}>
                   <Text style={styles.sectionTitle}>My Accounts</Text>
-                  <Pressable onPress={() => setAccountOpen(true)}>
+                  <Pressable onPress={() => {
+                    setEditingAccount(null);
+                    setAccountOpen(true);
+                  }}>
                     <Text style={styles.seeAllButton}>Add</Text>
                   </Pressable>
                 </View>
@@ -515,7 +625,7 @@ function AppContent() {
                     <Text style={styles.emptyText}>No accounts yet.</Text>
                   }
                   renderItem={({ item, index }) => (
-                    <View
+                    <Pressable
                       style={[
                         styles.accountCard,
                         index % 3 === 0
@@ -524,6 +634,10 @@ function AppContent() {
                             ? styles.accountPurple
                             : styles.accountGold,
                       ]}
+                      onPress={() => {
+                        setEditingAccount(item);
+                        setAccountOpen(true);
+                      }}
                     >
                       <View style={styles.accountGlow} />
                       <View style={styles.accountGlowSecondary} />
@@ -552,7 +666,7 @@ function AppContent() {
                           {formatCurrency(item.balance)}
                         </Text>
                       </View>
-                    </View>
+                    </Pressable>
                   )}
                 />
 
@@ -619,6 +733,7 @@ function AppContent() {
               setEditingTransaction(null);
             }}
             onSubmit={handleSubmitTransaction}
+            onDelete={handleDeleteTransaction}
             accounts={accounts}
             currencySymbol={currencySymbol}
             onAddAccount={() => setAccountOpen(true)}
@@ -626,8 +741,13 @@ function AppContent() {
           />
           <AccountSheet
             visible={isAccountOpen}
-            onClose={() => setAccountOpen(false)}
+            onClose={() => {
+              setAccountOpen(false);
+              setEditingAccount(null);
+            }}
             onSubmit={handleAddAccount}
+            onDelete={handleDeleteAccount}
+            initialValue={editingAccount}
           />
         </>
       )}

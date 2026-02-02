@@ -21,6 +21,7 @@ type QuickTransactionSheetProps = {
   visible: boolean;
   onClose: () => void;
   onSubmit: (entry: QuickTransaction) => void;
+  onDelete?: (entry: QuickTransaction) => void;
   accounts: Account[];
   currencySymbol: string;
   onAddAccount: () => void;
@@ -33,6 +34,7 @@ export default function QuickTransactionSheet({
   visible,
   onClose,
   onSubmit,
+  onDelete,
   accounts,
   currencySymbol,
   onAddAccount,
@@ -289,8 +291,18 @@ export default function QuickTransactionSheet({
               multiline
             />
             <Pressable style={styles.submitButton} onPress={handleSubmit}>
-              <Text style={styles.submitText}>Save transaction</Text>
+              <Text style={styles.submitText}>
+                {initialValue ? 'Update transaction' : 'Save transaction'}
+              </Text>
             </Pressable>
+            {initialValue && onDelete ? (
+              <Pressable
+                style={styles.deleteButton}
+                onPress={() => onDelete(initialValue)}
+              >
+                <Text style={styles.deleteText}>Delete transaction</Text>
+              </Pressable>
+            ) : null}
           </ScrollView>
         </Animated.View>
       </KeyboardAvoidingView>
@@ -510,5 +522,19 @@ const styles = StyleSheet.create({
     color: '#FFFFFF',
     fontWeight: '700',
     fontSize: 15,
+  },
+  deleteButton: {
+    marginTop: 10,
+    paddingVertical: 12,
+    borderRadius: 14,
+    borderWidth: 1,
+    borderColor: '#F2B8B8',
+    alignItems: 'center',
+    backgroundColor: '#FFF5F5',
+  },
+  deleteText: {
+    color: '#D64545',
+    fontWeight: '700',
+    fontSize: 14,
   },
 });

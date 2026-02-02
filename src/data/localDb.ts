@@ -37,6 +37,29 @@ export async function initLocalDb(): Promise<void> {
       FOREIGN KEY (account_id) REFERENCES accounts(id)
     );`,
   );
+  await db.executeSql(
+    `CREATE TABLE IF NOT EXISTS settings (
+      key TEXT PRIMARY KEY,
+      value TEXT
+    );`,
+  );
+}
+
+export async function setLocalSetting(key: string, value: string): Promise<void> {
+  const db = await getDb();
+  await db.executeSql(
+    'INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)',
+    [key, value],
+  );
+}
+
+export async function getLocalSetting(key: string): Promise<string | null> {
+  const db = await getDb();
+  const [result] = await db.executeSql('SELECT value FROM settings WHERE key = ?', [key]);
+  if (!result.rows.length) {
+    return null;
+  }
+  return result.rows.item(0).value ?? null;
 }
 
 export async function seedLocalDataIfEmpty(): Promise<void> {
@@ -346,4 +369,72 @@ export async function updateLocalTransaction(
     transaction: toTransaction(rowResult.rows.item(0)),
     accounts: updatedAccounts,
   };
+}
+
+export async function deleteLocalTransaction(
+  id: string,
+): Promise<{ account?: Account }> {
+  const db = await getDb();
+  const [existingResult] = await db.executeSql(
+    'SELECT * FROM transactions WHERE id = ?',
+    [id],
+  );
+  if (!existingResult.rows.length) {
+    return {};
+  }
+  const existing = existingResult.rows.item(0);
+  const accountId = existing.account_id ? String(existing.account_id) : undefined;
+  const account = accountId ? await findAccountByIdOrName(db, accountId) : null;
+
+  if (account) {
+    const delta = existing.type === 'income'
+      ? -Number(existing.amount)
+      : Number(existing.amount);
+    const nextBalance = Number(account.balance) + delta;
+    await db.executeSql('UPDATE accounts SET balance = ? WHERE id = ?', [nextBalance, account.id]);
+  }
+
+  await db.executeSql('DELETE FROM transactions WHERE id = ?', [id]);
+
+  if (account) {
+    const [rowResult] = await db.executeSql('SELECT * FROM accounts WHERE id = ?', [account.id]);
+    if (rowResult.rows.length) {
+      return { account: toAccount(rowResult.rows.item(0)) };
+    }
+  }
+  return {};
+}
+
+export async function updateLocalAccount(
+  id: string,
+  payload: {
+    name: string;
+    type: Account['type'];
+    balance: number;
+  },
+): Promise<Account> {
+  const db = await getDb();
+  await db.executeSql(
+    'UPDATE accounts SET name = ?, type = ?, balance = ? WHERE id = ?',
+    [payload.name, payload.type, Number(payload.balance || 0), id],
+  );
+  const [rowResult] = await db.executeSql('SELECT * FROM accounts WHERE id = ?', [id]);
+  return toAccount(rowResult.rows.item(0));
+}
+
+export async function deleteLocalAccount(
+  id: string,
+): Promise<{ accountId: string; transactionIds: string[] }> {
+  const db = await getDb();
+  const [transactionResult] = await db.executeSql(
+    'SELECT id FROM transactions WHERE account_id = ?',
+    [id],
+  );
+  const transactionIds: string[] = [];
+  for (let i = 0; i < transactionResult.rows.length; i += 1) {
+    transactionIds.push(String(transactionResult.rows.item(i).id));
+  }
+  await db.executeSql('DELETE FROM transactions WHERE account_id = ?', [id]);
+  await db.executeSql('DELETE FROM accounts WHERE id = ?', [id]);
+  return { accountId: id, transactionIds };
 }
