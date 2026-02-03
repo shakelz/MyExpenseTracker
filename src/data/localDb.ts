@@ -62,6 +62,12 @@ export async function getLocalSetting(key: string): Promise<string | null> {
   return result.rows.item(0).value ?? null;
 }
 
+export async function clearLocalData(): Promise<void> {
+  const db = await getDb();
+  await db.executeSql('DELETE FROM transactions');
+  await db.executeSql('DELETE FROM accounts');
+}
+
 export async function seedLocalDataIfEmpty(): Promise<void> {
   const db = await getDb();
   const [accountCount] = await db.executeSql('SELECT COUNT(*) as count FROM accounts');

@@ -9,6 +9,7 @@ import android.content.Intent
 import android.net.Uri
 import android.graphics.PixelFormat
 import android.graphics.drawable.GradientDrawable
+import android.animation.ValueAnimator
 import android.os.Build
 import android.os.IBinder
 import android.util.TypedValue
@@ -34,6 +35,11 @@ class SystemBubbleService : Service() {
   private var windowManager: WindowManager? = null
   private var bubbleView: View? = null
   private var formView: View? = null
+  private var formRoot: FrameLayout? = null
+  private var formCard: FrameLayout? = null
+  private var formContent: View? = null
+  private var formBackground: GradientDrawable? = null
+  private var isAnimatingForm: Boolean = false
   private var layoutParams: WindowManager.LayoutParams? = null
   private var lastBubbleX: Int = 0
   private var lastBubbleY: Int = 0
@@ -137,8 +143,21 @@ class SystemBubbleService : Service() {
   }
 
   private fun handleBubbleClick() {
-    moveBubbleToCenter()
-    showForm()
+    val bubble = bubbleView
+    if (bubble == null) {
+      showForm()
+      return
+    }
+
+    bubble.animate()
+      .translationYBy(dpToPx(12f).toFloat())
+      .alpha(0f)
+      .setDuration(120)
+      .withEndAction {
+        hideBubble()
+        showForm()
+      }
+      .start()
   }
 
   private fun showForm() {
@@ -152,16 +171,28 @@ class SystemBubbleService : Service() {
     )
     root.setBackgroundColor(0x00000000)
 
-    val card = LinearLayout(this).apply {
-      orientation = LinearLayout.VERTICAL
-      setPadding(dpToPx(16f), dpToPx(16f), dpToPx(16f), dpToPx(16f))
-      background = GradientDrawable().apply {
-        cornerRadius = dpToPx(18f).toFloat()
-        setColor(0xCC1F243A.toInt())
-        setStroke(dpToPx(1f), 0x55FFFFFF)
-      }
+    val bubbleSize = if (bubbleSizePx > 0) bubbleSizePx else dpToPx(56f)
+
+    val cardBackground = GradientDrawable().apply {
+      cornerRadius = bubbleSize / 2f
+      setColor(0xCC1F243A.toInt())
+      setStroke(dpToPx(1f), 0x55FFFFFF)
+    }
+
+    val cardContainer = FrameLayout(this).apply {
+      background = cardBackground
       elevation = dpToPx(10f).toFloat()
     }
+
+    val cardContent = LinearLayout(this).apply {
+      orientation = LinearLayout.VERTICAL
+      setPadding(dpToPx(16f), dpToPx(16f), dpToPx(16f), dpToPx(16f))
+      alpha = 0f
+    }
+    cardContent.layoutParams = FrameLayout.LayoutParams(
+      FrameLayout.LayoutParams.MATCH_PARENT,
+      FrameLayout.LayoutParams.WRAP_CONTENT
+    )
 
     val dragHandle = View(this).apply {
       background = GradientDrawable().apply {
@@ -173,7 +204,7 @@ class SystemBubbleService : Service() {
       gravity = Gravity.CENTER_HORIZONTAL
       bottomMargin = dpToPx(10f)
     }
-    card.addView(dragHandle, dragParams)
+    cardContent.addView(dragHandle, dragParams)
 
     fun createPill(textValue: String, bgColor: Int, textColor: Int): TextView {
       return TextView(this).apply {
@@ -245,9 +276,11 @@ class SystemBubbleService : Service() {
       LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f)
     )
 
-    val inputBackground = GradientDrawable().apply {
-      cornerRadius = dpToPx(12f).toFloat()
-      setColor(0xFFFFFFFF.toInt())
+    fun createInputBackground(): GradientDrawable {
+      return GradientDrawable().apply {
+        cornerRadius = dpToPx(12f).toFloat()
+        setColor(0xFFFFFFFF.toInt())
+      }
     }
 
     val amountInput = EditText(this).apply {
@@ -256,7 +289,8 @@ class SystemBubbleService : Service() {
       setPadding(dpToPx(12f), dpToPx(10f), dpToPx(12f), dpToPx(10f))
       setTextColor(0xFF1B1F33.toInt())
       setHintTextColor(0xFF9BA3C7.toInt())
-      background = inputBackground
+      background = createInputBackground()
+      minHeight = dpToPx(44f)
     }
 
     val noteInput = EditText(this).apply {
@@ -265,7 +299,8 @@ class SystemBubbleService : Service() {
       setPadding(dpToPx(12f), dpToPx(10f), dpToPx(12f), dpToPx(10f))
       setTextColor(0xFF1B1F33.toInt())
       setHintTextColor(0xFF9BA3C7.toInt())
-      background = inputBackground
+      background = createInputBackground()
+      minHeight = dpToPx(44f)
     }
 
     val categoryLabel = TextView(this).apply {
@@ -288,8 +323,9 @@ class SystemBubbleService : Service() {
         android.R.layout.simple_spinner_dropdown_item,
         categoryOptions
       )
-      background = inputBackground
-      setPadding(dpToPx(8f), dpToPx(6f), dpToPx(8f), dpToPx(6f))
+      background = createInputBackground()
+      setPadding(dpToPx(12f), dpToPx(10f), dpToPx(12f), dpToPx(10f))
+      minimumHeight = dpToPx(44f)
     }
 
     val accountLabels = accountOptions.map { option ->
@@ -306,8 +342,9 @@ class SystemBubbleService : Service() {
         android.R.layout.simple_spinner_dropdown_item,
         accountLabels
       )
-      background = inputBackground
-      setPadding(dpToPx(8f), dpToPx(6f), dpToPx(8f), dpToPx(6f))
+      background = createInputBackground()
+      setPadding(dpToPx(12f), dpToPx(10f), dpToPx(12f), dpToPx(10f))
+      minimumHeight = dpToPx(44f)
     }
 
     var selectedCategory = categoryOptions.firstOrNull() ?: "Other"
@@ -371,23 +408,23 @@ class SystemBubbleService : Service() {
       closeFormAndReturnBubble()
     }
 
-    card.addView(toggleContainer)
-    card.addView(spaceView(10f))
-    card.addView(amountLabel)
-    card.addView(spaceView(6f))
+    cardContent.addView(toggleContainer)
+    cardContent.addView(spaceView(10f))
+    cardContent.addView(amountLabel)
+    cardContent.addView(spaceView(6f))
 
     amountInput.layoutParams = LinearLayout.LayoutParams(
       LinearLayout.LayoutParams.MATCH_PARENT,
       LinearLayout.LayoutParams.WRAP_CONTENT
     )
-    card.addView(amountInput)
-    card.addView(spaceView(8f))
+    cardContent.addView(amountInput)
+    cardContent.addView(spaceView(8f))
     noteInput.layoutParams = LinearLayout.LayoutParams(
       LinearLayout.LayoutParams.MATCH_PARENT,
       LinearLayout.LayoutParams.WRAP_CONTENT
     )
-    card.addView(noteInput)
-    card.addView(spaceView(10f))
+    cardContent.addView(noteInput)
+    cardContent.addView(spaceView(10f))
 
     val row = LinearLayout(this).apply {
       orientation = LinearLayout.HORIZONTAL
@@ -424,64 +461,136 @@ class SystemBubbleService : Service() {
       LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f)
     )
 
-    card.addView(row)
-    card.addView(spaceView(12f))
-    card.addView(saveButton)
-    card.addView(spaceView(6f))
-    card.addView(cancelButton)
+    cardContent.addView(row)
+    cardContent.addView(spaceView(12f))
+    cardContent.addView(saveButton)
+    cardContent.addView(spaceView(6f))
+    cardContent.addView(cancelButton)
 
     updateTypeUi()
 
     var dragStartX = 0f
     var dragStartY = 0f
-    var cardStartX = 0f
-    var cardStartY = 0f
-    dragHandle.setOnTouchListener { _, event ->
+    var cardStartMarginX = 0
+    var cardStartMarginY = 0
+    var isDragging = false
+    val dragSlop = dpToPx(8f)
+
+    cardContainer.setOnTouchListener { _, event ->
       when (event.action) {
         MotionEvent.ACTION_DOWN -> {
           dragStartX = event.rawX
           dragStartY = event.rawY
-          cardStartX = card.translationX
-          cardStartY = card.translationY
+          val params = cardContainer.layoutParams as FrameLayout.LayoutParams
+          cardStartMarginX = params.leftMargin
+          cardStartMarginY = params.topMargin
+          isDragging = false
           true
         }
         MotionEvent.ACTION_MOVE -> {
           val dx = event.rawX - dragStartX
           val dy = event.rawY - dragStartY
-          val nextX = cardStartX + dx
-          val nextY = cardStartY + dy
-          val maxX = ((root.width - card.width) / 2).toFloat().coerceAtLeast(0f)
-          val maxY = ((root.height - card.height) / 2).toFloat().coerceAtLeast(0f)
-          card.translationX = nextX.coerceIn(-maxX, maxX)
-          card.translationY = nextY.coerceIn(-maxY, maxY)
+          if (!isDragging && (Math.abs(dx) > dragSlop || Math.abs(dy) > dragSlop)) {
+            isDragging = true
+          }
+          if (isDragging) {
+            val params = cardContainer.layoutParams as FrameLayout.LayoutParams
+            val maxX = (root.width - cardContainer.width).coerceAtLeast(0)
+            val maxY = (root.height - cardContainer.height).coerceAtLeast(0)
+            params.leftMargin = (cardStartMarginX + dx.toInt()).coerceIn(0, maxX)
+            params.topMargin = (cardStartMarginY + dy.toInt()).coerceIn(0, maxY)
+            cardContainer.layoutParams = params
+          }
+          true
+        }
+        MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> {
+          isDragging = false
           true
         }
         else -> false
       }
     }
 
-    val cardParams = FrameLayout.LayoutParams(
-      dpToPx(320f),
-      FrameLayout.LayoutParams.WRAP_CONTENT
-    ).apply {
-      gravity = Gravity.CENTER
+    dragHandle.setOnTouchListener { v, event ->
+      cardContainer.onTouchEvent(event)
     }
 
-    root.addView(card, cardParams)
-    card.translationY = -dpToPx(24f).toFloat()
-    card.alpha = 0f
-    card.animate()
-      .translationY(0f)
-      .alpha(1f)
-      .setDuration(180)
-      .start()
+    cardContainer.addView(cardContent)
+
+    val cardParams = FrameLayout.LayoutParams(
+      bubbleSize,
+      bubbleSize
+    ).apply {
+      gravity = Gravity.TOP or Gravity.START
+      leftMargin = lastBubbleX
+      topMargin = lastBubbleY
+    }
+
+    root.addView(cardContainer, cardParams)
+    cardContainer.post {
+      val metrics = resources.displayMetrics
+      val targetWidth = dpToPx(320f)
+      val widthSpec = View.MeasureSpec.makeMeasureSpec(targetWidth, View.MeasureSpec.EXACTLY)
+      val heightSpec = View.MeasureSpec.makeMeasureSpec(0, View.MeasureSpec.UNSPECIFIED)
+      cardContent.measure(widthSpec, heightSpec)
+      val targetHeight = cardContent.measuredHeight
+
+      val startWidth = bubbleSize
+      val startHeight = bubbleSize
+      val startX = lastBubbleX
+      val startY = lastBubbleY
+      val targetX = ((metrics.widthPixels - targetWidth) / 2f).toInt()
+      val targetY = (metrics.heightPixels * 0.12f).toInt()
+      val startRadius = bubbleSize / 2f
+      val targetRadius = dpToPx(18f).toFloat()
+
+      val animator = ValueAnimator.ofFloat(0f, 1f)
+      animator.duration = 260
+      isAnimatingForm = true
+      animator.addUpdateListener { animation ->
+        val progress = animation.animatedValue as Float
+        val nextWidth = (startWidth + (targetWidth - startWidth) * progress).toInt()
+        val nextHeight = (startHeight + (targetHeight - startHeight) * progress).toInt()
+        val nextX = (startX + (targetX - startX) * progress).toInt()
+        val nextY = (startY + (targetY - startY) * progress).toInt()
+        val params = cardContainer.layoutParams as FrameLayout.LayoutParams
+        params.width = nextWidth
+        params.height = nextHeight
+        params.leftMargin = nextX
+        params.topMargin = nextY
+        cardContainer.layoutParams = params
+        cardBackground.cornerRadius = startRadius + (targetRadius - startRadius) * progress
+        val contentAlpha = ((progress - 0.2f) / 0.8f).coerceIn(0f, 1f)
+        cardContent.alpha = contentAlpha
+      }
+      animator.addListener(object : android.animation.AnimatorListenerAdapter() {
+        override fun onAnimationEnd(animation: android.animation.Animator) {
+          val params = cardContainer.layoutParams as FrameLayout.LayoutParams
+          params.width = targetWidth
+          params.height = targetHeight
+          params.leftMargin = targetX
+          params.topMargin = targetY
+          cardContainer.layoutParams = params
+          cardContent.alpha = 1f
+          isAnimatingForm = false
+        }
+      })
+      animator.start()
+    }
 
     root.setOnTouchListener { _, event ->
       if (event.action == MotionEvent.ACTION_DOWN) {
         val cardRect = android.graphics.Rect()
-        card.getGlobalVisibleRect(cardRect)
+        cardContainer.getGlobalVisibleRect(cardRect)
         if (!cardRect.contains(event.rawX.toInt(), event.rawY.toInt())) {
-          closeFormAndReturnBubble()
+          val imm = getSystemService(Context.INPUT_METHOD_SERVICE) as android.view.inputmethod.InputMethodManager
+          val isKeyboardOpen = imm.isAcceptingText
+          if (isKeyboardOpen) {
+            imm.hideSoftInputFromWindow(root.windowToken, 0)
+            root.clearFocus()
+          } else {
+            closeFormAndReturnBubble()
+          }
           return@setOnTouchListener true
         }
       }
@@ -510,18 +619,84 @@ class SystemBubbleService : Service() {
 
     wm.addView(root, params)
     formView = root
+    formRoot = root
+    formCard = cardContainer
+    formContent = cardContent
+    formBackground = cardBackground
+    isAnimatingForm = false
   }
 
   private fun hideForm() {
     val view = formView ?: return
     windowManager?.removeView(view)
     formView = null
+    formRoot = null
+    formCard = null
+    formContent = null
+    formBackground = null
+    isAnimatingForm = false
   }
 
   private fun closeFormAndReturnBubble() {
-    hideForm()
-    showBubble(lastBubbleX, lastBubbleY)
-    snapBubbleToEdge()
+    if (isAnimatingForm) return
+
+    val card = formCard
+    val root = formRoot
+    val content = formContent
+    val background = formBackground
+    if (card == null || root == null || content == null || background == null) {
+      hideForm()
+      showBubble(lastBubbleX, lastBubbleY)
+      snapBubbleToEdge()
+      return
+    }
+
+    val params = card.layoutParams as? FrameLayout.LayoutParams
+    if (params == null) {
+      hideForm()
+      showBubble(lastBubbleX, lastBubbleY)
+      snapBubbleToEdge()
+      return
+    }
+
+    isAnimatingForm = true
+    val startWidth = card.width
+    val startHeight = card.height
+    val startX = params.leftMargin
+    val startY = params.topMargin
+    val bubbleSize = if (bubbleSizePx > 0) bubbleSizePx else dpToPx(56f)
+    val targetWidth = bubbleSize
+    val targetHeight = bubbleSize
+    val targetX = lastBubbleX
+    val targetY = lastBubbleY
+    val startRadius = background.cornerRadius
+    val targetRadius = bubbleSize / 2f
+
+    val animator = ValueAnimator.ofFloat(0f, 1f)
+    animator.duration = 220
+    animator.addUpdateListener { animation ->
+      val progress = animation.animatedValue as Float
+      val nextWidth = (startWidth + (targetWidth - startWidth) * progress).toInt()
+      val nextHeight = (startHeight + (targetHeight - startHeight) * progress).toInt()
+      val nextX = (startX + (targetX - startX) * progress).toInt()
+      val nextY = (startY + (targetY - startY) * progress).toInt()
+      params.width = nextWidth
+      params.height = nextHeight
+      params.leftMargin = nextX
+      params.topMargin = nextY
+      card.layoutParams = params
+      background.cornerRadius = startRadius + (targetRadius - startRadius) * progress
+      content.alpha = (1f - progress).coerceIn(0f, 1f)
+    }
+    animator.addListener(object : android.animation.AnimatorListenerAdapter() {
+      override fun onAnimationEnd(animation: android.animation.Animator) {
+        hideForm()
+        showBubble(lastBubbleX, lastBubbleY)
+        snapBubbleToEdge()
+        isAnimatingForm = false
+      }
+    })
+    animator.start()
   }
 
   private fun saveTransaction(
@@ -651,6 +826,10 @@ class SystemBubbleService : Service() {
     private var initialTouchX = 0f
     private var initialTouchY = 0f
     private var isClick = false
+    private var downTime = 0L
+
+    private val clickSlop = dpToPx(6f)
+    private val longPressMs = 250L
 
     override fun onTouch(v: View?, event: MotionEvent): Boolean {
       val params = layoutParams ?: return false
@@ -661,12 +840,13 @@ class SystemBubbleService : Service() {
           initialY = params.y
           initialTouchX = event.rawX
           initialTouchY = event.rawY
+          downTime = System.currentTimeMillis()
           return true
         }
         MotionEvent.ACTION_MOVE -> {
           val dx = (event.rawX - initialTouchX).toInt()
           val dy = (event.rawY - initialTouchY).toInt()
-          if (kotlin.math.abs(dx) > 6 || kotlin.math.abs(dy) > 6) {
+          if (kotlin.math.abs(dx) > clickSlop || kotlin.math.abs(dy) > clickSlop) {
             isClick = false
           }
           params.x = initialX + dx
@@ -675,7 +855,8 @@ class SystemBubbleService : Service() {
           return true
         }
         MotionEvent.ACTION_UP -> {
-          if (isClick) {
+          val duration = System.currentTimeMillis() - downTime
+          if (isClick && duration < longPressMs) {
             handleBubbleClick()
           }
           lastBubbleX = params.x
@@ -698,11 +879,19 @@ class SystemBubbleService : Service() {
     val edgeX = if (params.x + bubbleSizePx / 2 < screenWidth / 2) 0
     else screenWidth - bubbleSizePx
     val clampedY = params.y.coerceIn(0, screenHeight - bubbleSizePx)
-    params.x = edgeX
-    params.y = clampedY
-    windowManager?.updateViewLayout(bubbleView, params)
-    lastBubbleX = params.x
-    lastBubbleY = params.y
+    val startX = params.x
+    val startY = params.y
+    val animator = ValueAnimator.ofFloat(0f, 1f)
+    animator.duration = 200
+    animator.addUpdateListener { valueAnimator ->
+      val t = valueAnimator.animatedValue as Float
+      params.x = (startX + (edgeX - startX) * t).toInt()
+      params.y = (startY + (clampedY - startY) * t).toInt()
+      windowManager?.updateViewLayout(bubbleView, params)
+      lastBubbleX = params.x
+      lastBubbleY = params.y
+    }
+    animator.start()
   }
 
   private fun moveBubbleToCenter() {

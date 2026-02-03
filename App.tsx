@@ -16,6 +16,7 @@ import {
   useWindowDimensions,
   View,
 } from 'react-native';
+import { GestureHandlerRootView } from 'react-native-gesture-handler';
 import {
   SafeAreaProvider,
   useSafeAreaInsets,
@@ -40,13 +41,13 @@ import {
 import {
   createLocalAccount,
   createLocalTransaction,
+  clearLocalData,
   deleteLocalAccount,
   deleteLocalTransaction,
   fetchLocalAccounts,
   fetchLocalTransactions,
   getLocalSetting,
   initLocalDb,
-  seedLocalDataIfEmpty,
   setLocalSetting,
   updateLocalAccount,
   updateLocalTransaction,
@@ -57,10 +58,12 @@ function App() {
   const isDarkMode = useColorScheme() === 'dark';
 
   return (
-    <SafeAreaProvider>
-      <StatusBar barStyle={isDarkMode ? 'light-content' : 'dark-content'} />
-      <AppContent />
-    </SafeAreaProvider>
+    <GestureHandlerRootView style={styles.gestureRoot}>
+      <SafeAreaProvider>
+        <StatusBar barStyle={isDarkMode ? 'light-content' : 'dark-content'} />
+        <AppContent />
+      </SafeAreaProvider>
+    </GestureHandlerRootView>
   );
 }
 
@@ -207,7 +210,11 @@ function AppContent() {
   useEffect(() => {
     initLocalDb()
       .then(async () => {
-        await seedLocalDataIfEmpty();
+        const cleared = await getLocalSetting('db_cleared_v1');
+        if (!cleared) {
+          await clearLocalData();
+          await setLocalSetting('db_cleared_v1', '1');
+        }
         const savedCountryCode = await getLocalSetting('country_code');
         if (savedCountryCode) {
           const savedCountry = countries.find(
@@ -752,7 +759,7 @@ function AppContent() {
         </>
       )}
 
-      <View style={styles.tabBar}>
+      <View style={[styles.tabBar, { paddingBottom: Math.max(safeAreaInsets.bottom, 12) }]}>
         <Pressable
           style={[
             styles.tabItem,
@@ -760,6 +767,7 @@ function AppContent() {
           ]}
           onPress={() => setActiveScreen('home')}
         >
+          <Text style={[styles.tabIcon, activeScreen === 'home' && styles.tabIconActive]}>🏠</Text>
           <Text
             style={[
               styles.tabText,
@@ -776,6 +784,7 @@ function AppContent() {
           ]}
           onPress={() => setActiveScreen('analysis')}
         >
+          <Text style={[styles.tabIcon, activeScreen === 'analysis' && styles.tabIconActive]}>📊</Text>
           <Text
             style={[
               styles.tabText,
@@ -792,6 +801,7 @@ function AppContent() {
           ]}
           onPress={() => setActiveScreen('settings')}
         >
+          <Text style={[styles.tabIcon, activeScreen === 'settings' && styles.tabIconActive]}>⚙️</Text>
           <Text
             style={[
               styles.tabText,
@@ -807,6 +817,9 @@ function AppContent() {
 }
 
 const styles = StyleSheet.create({
+  gestureRoot: {
+    flex: 1,
+  },
   container: {
     flex: 1,
     backgroundColor: '#1B1B3A',
@@ -899,29 +912,44 @@ const styles = StyleSheet.create({
   },
   tabBar: {
     flexDirection: 'row',
-    paddingHorizontal: 20,
-    paddingVertical: 12,
-    backgroundColor: '#141433',
-    borderTopWidth: 1,
-    borderTopColor: 'rgba(255,255,255,0.08)',
+    paddingHorizontal: 16,
+    paddingTop: 10,
+    backgroundColor: '#1B1B3A',
+    borderTopLeftRadius: 20,
+    borderTopRightRadius: 20,
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: -4 },
+    shadowOpacity: 0.15,
+    shadowRadius: 12,
+    elevation: 16,
   },
   tabItem: {
     flex: 1,
-    paddingVertical: 10,
-    borderRadius: 14,
+    paddingVertical: 8,
+    borderRadius: 16,
     alignItems: 'center',
+    justifyContent: 'center',
   },
   tabItemActive: {
-    backgroundColor: 'rgba(255,255,255,0.1)',
+    backgroundColor: 'rgba(78, 124, 255, 0.15)',
+  },
+  tabIcon: {
+    fontSize: 20,
+    marginBottom: 4,
+    opacity: 0.6,
+  },
+  tabIconActive: {
+    opacity: 1,
   },
   tabText: {
-    fontSize: 12,
-    color: 'rgba(255,255,255,0.6)',
+    fontSize: 11,
+    color: 'rgba(255,255,255,0.5)',
     fontWeight: '600',
-    letterSpacing: 0.2,
+    letterSpacing: 0.3,
   },
   tabTextActive: {
-    color: '#FFFFFF',
+    color: '#4E7CFF',
+    fontWeight: '700',
   },
   sectionHeader: {
     flexDirection: 'row',
