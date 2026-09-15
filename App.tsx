@@ -106,12 +106,14 @@ function AppContent() {
 
   const countries: CountryOption[] = useMemo(
     () => [
+      { name: 'Pakistan', code: 'PK', currencySymbol: 'Rs ' },
+      { name: 'India', code: 'IN', currencySymbol: '₹' },
       { name: 'United States', code: 'US', currencySymbol: '$' },
       { name: 'United Kingdom', code: 'GB', currencySymbol: '£' },
       { name: 'Eurozone', code: 'EU', currencySymbol: '€' },
-      { name: 'India', code: 'IN', currencySymbol: '₹' },
+      { name: 'Saudi Arabia', code: 'SA', currencySymbol: 'SAR ' },
+      { name: 'United Arab Emirates', code: 'AE', currencySymbol: 'AED ' },
       { name: 'Japan', code: 'JP', currencySymbol: '¥' },
-      { name: 'United Arab Emirates', code: 'AE', currencySymbol: 'د.إ' },
     ],
     [],
   );
@@ -119,6 +121,15 @@ function AppContent() {
     countries[0],
   );
   const currencySymbol = selectedCountry.currencySymbol;
+
+  const formattedToday = useMemo(() => {
+    return new Date().toLocaleDateString('en-US', {
+      weekday: 'long',
+      month: 'long',
+      day: 'numeric',
+      year: 'numeric',
+    });
+  }, []);
 
   const totalAccountsBalance = useMemo(
     () => accounts.reduce((sum, a) => sum + (a.balance || 0), 0),
@@ -419,6 +430,14 @@ function AppContent() {
         // ignore local sync errors
       }
     }
+    try {
+      const [freshAccounts, freshTxs] = await Promise.all([
+        fetchLocalAccounts(),
+        fetchLocalTransactions(),
+      ]);
+      setAccounts(freshAccounts);
+      setTransactions(freshTxs);
+    } catch {}
   };
 
   const findAccountIdByDetails = (
@@ -679,7 +698,7 @@ function AppContent() {
                     <View style={styles.headerTextBlock}>
                       <Text style={styles.headerTitle}>Expense Tracker</Text>
                       <Text style={styles.headerSubtitle}>
-                        Sunday, February 1, 2026
+                        {formattedToday}
                       </Text>
                     </View>
                     <Pressable

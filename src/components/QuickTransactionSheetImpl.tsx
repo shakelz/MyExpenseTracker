@@ -196,7 +196,7 @@ export default function QuickTransactionSheet({
                 {account.name}
               </Text>
               <Text style={styles.accountChipSub}>
-                {account.type} · {currencySymbol}{account.balance.toFixed(2)}
+                {account.type} · {currencySymbol}{Number(account.balance || 0).toFixed(2)}
               </Text>
             </Pressable>
           ))}
