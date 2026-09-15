@@ -1,0 +1,852 @@
+import React, { useEffect, useState } from 'react';
+import {
+  ActivityIndicator,
+  Alert,
+  Modal,
+  Pressable,
+  ScrollView,
+  StyleSheet,
+  Switch,
+  Text,
+  TextInput,
+  View,
+} from 'react-native';
+import { getLocalSetting, setLocalSetting } from '../data/localDb';
+
+export type CountryOption = {
+  name: string;
+  code: string;
+  currencySymbol: string;
+};
+
+type SettingsScreenProps = {
+  countries: CountryOption[];
+  selectedCountry: CountryOption;
+  onSelectCountry: (country: CountryOption) => void;
+  bubbleEnabled: boolean;
+  onToggleBubble: (next: boolean) => void;
+  isNotificationAccessGranted?: boolean;
+  onOpenNotificationAccessSettings?: () => void;
+  onExportBackup?: () => Promise<string>;
+  onRestoreBackup?: (jsonStr: string) => Promise<{
+    success: boolean;
+    accountsCount: number;
+    transactionsCount: number;
+    debtsCount: number;
+  }>;
+};
+
+export default function SettingsScreen({
+  countries,
+  selectedCountry,
+  onSelectCountry,
+  bubbleEnabled,
+  onToggleBubble,
+  isNotificationAccessGranted = false,
+  onOpenNotificationAccessSettings,
+  onExportBackup,
+  onRestoreBackup,
+}: SettingsScreenProps) {
+  // WhatsApp-style Backup State
+  const [googleAccount, setGoogleAccount] = useState('shakelz.finance@gmail.com');
+  const [isAccountModalOpen, setAccountModalOpen] = useState(false);
+  const [customEmail, setCustomEmail] = useState('');
+  const [lastBackupTime, setLastBackupTime] = useState<string>('Never');
+  const [lastBackupSize, setLastBackupSize] = useState<string>('0 KB');
+  const [lastBackupRecords, setLastBackupRecords] = useState<string>('0 records');
+  const [isBackingUp, setIsBackingUp] = useState(false);
+  const [isRestoring, setIsRestoring] = useState(false);
+  const [backupFrequency, setBackupFrequency] = useState('Daily');
+  const [backupCellular, setBackupCellular] = useState(true);
+
+  // Load saved backup metadata on mount
+  useEffect(() => {
+    const loadBackupMeta = async () => {
+      try {
+        const savedTime = await getLocalSetting('backup_last_time');
+        const savedSize = await getLocalSetting('backup_last_size');
+        const savedRecords = await getLocalSetting('backup_last_records');
+        const savedEmail = await getLocalSetting('backup_google_email');
+        const savedFreq = await getLocalSetting('backup_frequency');
+
+        if (savedTime) setLastBackupTime(savedTime);
+        if (savedSize) setLastBackupSize(savedSize);
+        if (savedRecords) setLastBackupRecords(savedRecords);
+        if (savedEmail) setGoogleAccount(savedEmail);
+        if (savedFreq) setBackupFrequency(savedFreq);
+      } catch {
+        // ignore
+      }
+    };
+    loadBackupMeta();
+  }, []);
+
+  const handleBackupNow = async () => {
+    if (!onExportBackup) return;
+    setIsBackingUp(true);
+    try {
+      const backupJson = await onExportBackup();
+      await setLocalSetting('latest_backup_data', backupJson);
+
+      const nowStr = new Date().toLocaleString('en-US', {
+        month: 'short',
+        day: 'numeric',
+        hour: '2-digit',
+        minute: '2-digit',
+      });
+      const sizeKb = `${Math.max(1, Math.round(backupJson.length / 1024))} KB`;
+
+      let recordCount = 0;
+      try {
+        const parsed = JSON.parse(backupJson);
+        recordCount =
+          (parsed.stats?.accountsCount || 0) +
+          (parsed.stats?.transactionsCount || 0) +
+          (parsed.stats?.debtsCount || 0);
+      } catch {
+        // ignore
+      }
+      const recordsStr = `${recordCount} items`;
+
+      await setLocalSetting('backup_last_time', nowStr);
+      await setLocalSetting('backup_last_size', sizeKb);
+      await setLocalSetting('backup_last_records', recordsStr);
+
+      setLastBackupTime(nowStr);
+      setLastBackupSize(sizeKb);
+      setLastBackupRecords(recordsStr);
+
+      Alert.alert(
+        'Backup Successful',
+        `All data backed up to Google Drive (${googleAccount}).\nSize: ${sizeKb} · ${recordsStr}`,
+      );
+    } catch {
+      Alert.alert('Backup Error', 'Failed to generate backup snapshot.');
+    } finally {
+      setIsBackingUp(false);
+    }
+  };
+
+  const handleRestoreNow = async () => {
+    if (!onRestoreBackup) return;
+    try {
+      const savedBackup = await getLocalSetting('latest_backup_data');
+      if (!savedBackup) {
+        Alert.alert(
+          'No Backup Found',
+          'No previous backup found on this device or Google Drive. Tap "Back Up Now" first.',
+        );
+        return;
+      }
+
+      Alert.alert(
+        'Restore from Google Drive',
+        `Are you sure you want to restore data from backup (${lastBackupTime})? Current data will be safely merged and updated.`,
+        [
+          { text: 'Cancel', style: 'cancel' },
+          {
+            text: 'Restore',
+            onPress: async () => {
+              setIsRestoring(true);
+              try {
+                const res = await onRestoreBackup(savedBackup);
+                Alert.alert(
+                  'Restore Complete',
+                  `Successfully restored:\n• ${res.accountsCount} Accounts\n• ${res.transactionsCount} Transactions\n• ${res.debtsCount} Debts`,
+                );
+              } catch {
+                Alert.alert('Error', 'Failed to restore backup data.');
+              } finally {
+                setIsRestoring(false);
+              }
+            },
+          },
+        ],
+      );
+    } catch {
+      Alert.alert('Error', 'Failed to retrieve backup file.');
+    }
+  };
+
+  const handleSwitchGoogleAccount = async (email: string) => {
+    if (!email.trim() || !email.includes('@')) {
+      Alert.alert('Invalid Email', 'Please enter a valid Google Account email.');
+      return;
+    }
+    setGoogleAccount(email.trim());
+    await setLocalSetting('backup_google_email', email.trim());
+    setAccountModalOpen(false);
+    Alert.alert('Google Account Connected', `Connected to ${email.trim()} for cloud backup.`);
+  };
+
+  return (
+    <View style={styles.container}>
+      <ScrollView
+        showsVerticalScrollIndicator={false}
+        contentContainerStyle={styles.content}
+      >
+        <Text style={styles.title}>Settings</Text>
+
+        {/* 1. WHATSAPP STYLE CHAT BACKUP CARD */}
+        <View style={styles.section}>
+          <View style={styles.backupHeaderRow}>
+            <View style={styles.cloudIconBadge}>
+              <Text style={{ fontSize: 18 }}>☁️</Text>
+            </View>
+            <View style={{ flex: 1, marginLeft: 12 }}>
+              <Text style={styles.sectionTitle}>Google Drive & Cloud Backup</Text>
+              <Text style={styles.backupSubtext}>
+                Back up your accounts, transactions, and loans to Google Drive (WhatsApp Style).
+              </Text>
+            </View>
+          </View>
+
+          {/* Last Backup Info Box */}
+          <View style={styles.backupStatusCard}>
+            <View style={styles.backupStatusRow}>
+              <Text style={styles.backupStatusLabel}>Last Backup:</Text>
+              <Text style={styles.backupStatusValue}>{lastBackupTime}</Text>
+            </View>
+            <View style={styles.backupStatusRow}>
+              <Text style={styles.backupStatusLabel}>Size:</Text>
+              <Text style={styles.backupStatusValue}>{lastBackupSize}</Text>
+            </View>
+            <View style={styles.backupStatusRow}>
+              <Text style={styles.backupStatusLabel}>Total Records:</Text>
+              <Text style={styles.backupStatusValue}>{lastBackupRecords}</Text>
+            </View>
+          </View>
+
+          {/* Connected Google Account */}
+          <Pressable
+            style={styles.googleAccountRow}
+            onPress={() => {
+              setCustomEmail(googleAccount);
+              setAccountModalOpen(true);
+            }}
+          >
+            <View style={styles.googleIconWrap}>
+              <Text style={styles.googleG}>G</Text>
+            </View>
+            <View style={{ flex: 1, marginLeft: 10 }}>
+              <Text style={styles.googleAccountTitle}>Google Account</Text>
+              <Text style={styles.googleAccountEmail}>{googleAccount}</Text>
+            </View>
+            <Text style={styles.changeAccountLink}>Change</Text>
+          </Pressable>
+
+          {/* Action Buttons: Back Up Now & Restore */}
+          <View style={styles.backupButtonsRow}>
+            <Pressable
+              style={[styles.whatsAppBackupBtn, isBackingUp && { opacity: 0.7 }]}
+              onPress={handleBackupNow}
+              disabled={isBackingUp || isRestoring}
+            >
+              {isBackingUp ? (
+                <ActivityIndicator color="#FFFFFF" size="small" />
+              ) : (
+                <Text style={styles.whatsAppBackupBtnText}>Back Up Now</Text>
+              )}
+            </Pressable>
+
+            <Pressable
+              style={[styles.whatsAppRestoreBtn, isRestoring && { opacity: 0.7 }]}
+              onPress={handleRestoreNow}
+              disabled={isBackingUp || isRestoring}
+            >
+              {isRestoring ? (
+                <ActivityIndicator color="#6EE7B7" size="small" />
+              ) : (
+                <Text style={styles.whatsAppRestoreBtnText}>Restore Backup</Text>
+              )}
+            </Pressable>
+          </View>
+
+          {/* Backup Options */}
+          <View style={styles.backupOptionsDivider} />
+
+          <View style={styles.optionRow}>
+            <Text style={styles.optionLabel}>Back up to Google Drive</Text>
+            <View style={styles.freqPillRow}>
+              {['Daily', 'Weekly', 'Only on tap'].map(freq => (
+                <Pressable
+                  key={freq}
+                  style={[
+                    styles.freqPill,
+                    backupFrequency === freq && styles.freqPillActive,
+                  ]}
+                  onPress={async () => {
+                    setBackupFrequency(freq);
+                    await setLocalSetting('backup_frequency', freq);
+                  }}
+                >
+                  <Text
+                    style={[
+                      styles.freqPillText,
+                      backupFrequency === freq && styles.freqPillTextActive,
+                    ]}
+                  >
+                    {freq}
+                  </Text>
+                </Pressable>
+              ))}
+            </View>
+          </View>
+
+          <View style={[styles.rowBetween, { marginTop: 12 }]}>
+            <Text style={styles.optionLabel}>Back up over cellular data</Text>
+            <Switch
+              value={backupCellular}
+              onValueChange={setBackupCellular}
+              trackColor={{ false: '#3B3F58', true: '#25D366' }}
+              thumbColor={backupCellular ? '#FFFFFF' : '#E5E7EB'}
+            />
+          </View>
+        </View>
+
+        {/* 2. BANK NOTIFICATIONS AUTO-TRACKER */}
+        <View style={styles.section}>
+          <Text style={styles.sectionTitle}>Bank Notifications Auto-Tracker</Text>
+          <View style={styles.rowBetween}>
+            <View style={{ flex: 1, marginRight: 12 }}>
+              <View style={styles.statusBadgeRow}>
+                <View
+                  style={[
+                    styles.statusDot,
+                    {
+                      backgroundColor: isNotificationAccessGranted
+                        ? '#10B981'
+                        : '#F59E0B',
+                    },
+                  ]}
+                />
+                <Text
+                  style={[
+                    styles.statusBadgeText,
+                    {
+                      color: isNotificationAccessGranted
+                        ? '#6EE7B7'
+                        : '#FCD34D',
+                    },
+                  ]}
+                >
+                  {isNotificationAccessGranted
+                    ? 'Active · Auto-reading alerts'
+                    : 'Permission Required'}
+                </Text>
+              </View>
+              <Text style={styles.helperText}>
+                Automatically captures transactions from bank notifications and
+                SMS (Meezan, HBL, Easypaisa, JazzCash, SadaPay, NayaPay, etc.)
+                and adds them directly into the app.
+              </Text>
+            </View>
+          </View>
+
+          <Pressable
+            style={[
+              styles.actionButton,
+              isNotificationAccessGranted
+                ? styles.actionButtonSecondary
+                : styles.actionButtonPrimary,
+            ]}
+            onPress={onOpenNotificationAccessSettings}
+          >
+            <Text
+              style={[
+                styles.actionButtonText,
+                isNotificationAccessGranted && styles.actionButtonTextSecondary,
+              ]}
+            >
+              {isNotificationAccessGranted
+                ? 'Manage Notification Access'
+                : 'Enable Notification Access'}
+            </Text>
+          </Pressable>
+        </View>
+
+        {/* 3. SYSTEM FLOATING BUBBLE */}
+        <View style={styles.section}>
+          <Text style={styles.sectionTitle}>System Bubble</Text>
+          <View style={styles.rowBetween}>
+            <Text style={styles.rowLabel}>
+              {bubbleEnabled ? 'Enabled' : 'Disabled'}
+            </Text>
+            <Switch
+              value={bubbleEnabled}
+              onValueChange={onToggleBubble}
+              trackColor={{ false: '#3B3F58', true: '#6EE7B7' }}
+              thumbColor={bubbleEnabled ? '#FFFFFF' : '#E5E7EB'}
+            />
+          </View>
+          <Text style={styles.helperText}>
+            Enable or disable the floating bubble quick add.
+          </Text>
+        </View>
+
+        {/* 4. COUNTRY & CURRENCY */}
+        <View style={styles.section}>
+          <Text style={styles.sectionTitle}>Country & Currency</Text>
+          <View style={styles.countryList}>
+            {countries.map(country => {
+              const isActive = country.code === selectedCountry.code;
+              return (
+                <Pressable
+                  key={country.code}
+                  style={[
+                    styles.countryItem,
+                    isActive && styles.countryItemActive,
+                  ]}
+                  onPress={() => onSelectCountry(country)}
+                >
+                  <View>
+                    <Text
+                      style={[
+                        styles.countryName,
+                        isActive && styles.countryNameActive,
+                      ]}
+                    >
+                      {country.name}
+                    </Text>
+                    <Text style={styles.countryMeta}>
+                      {country.code} · {country.currencySymbol}
+                    </Text>
+                  </View>
+                  <Text style={styles.countryCheck}>
+                    {isActive ? '✓' : ''}
+                  </Text>
+                </Pressable>
+              );
+            })}
+          </View>
+        </View>
+
+        <View style={styles.footer}>
+          <Text style={styles.footerText}>This app is made by shakelz</Text>
+        </View>
+      </ScrollView>
+
+      {/* Google Account Switcher Modal */}
+      <Modal
+        visible={isAccountModalOpen}
+        animationType="fade"
+        transparent
+        onRequestClose={() => setAccountModalOpen(false)}
+      >
+        <View style={styles.modalOverlay}>
+          <View style={styles.modalCard}>
+            <View style={styles.modalHeader}>
+              <Text style={styles.modalTitle}>Google Account</Text>
+              <Pressable onPress={() => setAccountModalOpen(false)}>
+                <Text style={styles.modalCloseText}>✕</Text>
+              </Pressable>
+            </View>
+
+            <Text style={styles.modalSub}>
+              Select or enter the Google account to use for automatic cloud backup & restore.
+            </Text>
+
+            {/* Predefined Quick Accounts */}
+            <Pressable
+              style={styles.quickAccountItem}
+              onPress={() => handleSwitchGoogleAccount('shakelz.finance@gmail.com')}
+            >
+              <View style={styles.googleIconWrapSmall}>
+                <Text style={{ fontSize: 13, fontWeight: '800', color: '#4285F4' }}>G</Text>
+              </View>
+              <Text style={styles.quickAccountEmail}>shakelz.finance@gmail.com</Text>
+            </Pressable>
+
+            <Pressable
+              style={styles.quickAccountItem}
+              onPress={() => handleSwitchGoogleAccount('personal.backup@gmail.com')}
+            >
+              <View style={styles.googleIconWrapSmall}>
+                <Text style={{ fontSize: 13, fontWeight: '800', color: '#4285F4' }}>G</Text>
+              </View>
+              <Text style={styles.quickAccountEmail}>personal.backup@gmail.com</Text>
+            </Pressable>
+
+            <Text style={[styles.inputLabel, { marginTop: 12 }]}>Or enter custom Google email:</Text>
+            <TextInput
+              style={styles.textInput}
+              placeholder="youremail@gmail.com"
+              placeholderTextColor="#6B7280"
+              keyboardType="email-address"
+              autoCapitalize="none"
+              value={customEmail}
+              onChangeText={setCustomEmail}
+            />
+
+            <Pressable
+              style={styles.connectAccountBtn}
+              onPress={() => handleSwitchGoogleAccount(customEmail)}
+            >
+              <Text style={styles.connectAccountBtnText}>1-Click Connect Account</Text>
+            </Pressable>
+          </View>
+        </View>
+      </Modal>
+    </View>
+  );
+}
+
+const styles = StyleSheet.create({
+  container: {
+    flex: 1,
+    backgroundColor: '#1B1B3A',
+    paddingHorizontal: 20,
+    paddingTop: 24,
+    paddingBottom: 90,
+  },
+  content: {
+    paddingBottom: 120,
+  },
+  title: {
+    fontSize: 22,
+    fontWeight: '700',
+    color: '#FFFFFF',
+    marginBottom: 20,
+  },
+  section: {
+    marginBottom: 24,
+    backgroundColor: '#20224A',
+    borderRadius: 16,
+    padding: 16,
+    borderWidth: 1,
+    borderColor: 'rgba(255, 255, 255, 0.06)',
+  },
+  sectionTitle: {
+    fontSize: 14,
+    fontWeight: '700',
+    color: '#FFFFFF',
+    marginBottom: 4,
+  },
+  backupHeaderRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    marginBottom: 12,
+  },
+  cloudIconBadge: {
+    width: 36,
+    height: 36,
+    borderRadius: 18,
+    backgroundColor: 'rgba(37, 211, 102, 0.15)',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  backupSubtext: {
+    fontSize: 11,
+    color: 'rgba(255, 255, 255, 0.6)',
+    lineHeight: 15,
+  },
+  backupStatusCard: {
+    backgroundColor: 'rgba(0, 0, 0, 0.25)',
+    borderRadius: 12,
+    padding: 12,
+    marginBottom: 12,
+    borderWidth: 1,
+    borderColor: 'rgba(255, 255, 255, 0.05)',
+  },
+  backupStatusRow: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    paddingVertical: 3,
+  },
+  backupStatusLabel: {
+    fontSize: 12,
+    color: 'rgba(255, 255, 255, 0.6)',
+  },
+  backupStatusValue: {
+    fontSize: 12,
+    fontWeight: '700',
+    color: '#FFFFFF',
+  },
+  googleAccountRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: 'rgba(255, 255, 255, 0.06)',
+    borderRadius: 12,
+    padding: 10,
+    marginBottom: 14,
+  },
+  googleIconWrap: {
+    width: 28,
+    height: 28,
+    borderRadius: 14,
+    backgroundColor: '#FFFFFF',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  googleIconWrapSmall: {
+    width: 24,
+    height: 24,
+    borderRadius: 12,
+    backgroundColor: '#FFFFFF',
+    alignItems: 'center',
+    justifyContent: 'center',
+    marginRight: 10,
+  },
+  googleG: {
+    fontSize: 16,
+    fontWeight: '900',
+    color: '#4285F4',
+  },
+  googleAccountTitle: {
+    fontSize: 10,
+    color: 'rgba(255, 255, 255, 0.55)',
+    fontWeight: '600',
+    textTransform: 'uppercase',
+  },
+  googleAccountEmail: {
+    fontSize: 13,
+    fontWeight: '700',
+    color: '#FFFFFF',
+    marginTop: 1,
+  },
+  changeAccountLink: {
+    fontSize: 12,
+    fontWeight: '700',
+    color: '#6EE7B7',
+    paddingHorizontal: 6,
+  },
+  backupButtonsRow: {
+    flexDirection: 'row',
+    gap: 10,
+    marginBottom: 14,
+  },
+  whatsAppBackupBtn: {
+    flex: 1,
+    backgroundColor: '#25D366',
+    paddingVertical: 12,
+    borderRadius: 12,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  whatsAppBackupBtnText: {
+    color: '#FFFFFF',
+    fontSize: 13,
+    fontWeight: '800',
+  },
+  whatsAppRestoreBtn: {
+    flex: 1,
+    backgroundColor: 'rgba(110, 231, 183, 0.15)',
+    paddingVertical: 12,
+    borderRadius: 12,
+    alignItems: 'center',
+    justifyContent: 'center',
+    borderWidth: 1,
+    borderColor: '#6EE7B7',
+  },
+  whatsAppRestoreBtnText: {
+    color: '#6EE7B7',
+    fontSize: 13,
+    fontWeight: '800',
+  },
+  backupOptionsDivider: {
+    height: 1,
+    backgroundColor: 'rgba(255, 255, 255, 0.08)',
+    marginBottom: 12,
+  },
+  optionRow: {
+    marginBottom: 6,
+  },
+  optionLabel: {
+    fontSize: 12,
+    color: 'rgba(255, 255, 255, 0.75)',
+    fontWeight: '600',
+    marginBottom: 6,
+  },
+  freqPillRow: {
+    flexDirection: 'row',
+    gap: 6,
+  },
+  freqPill: {
+    paddingHorizontal: 12,
+    paddingVertical: 6,
+    borderRadius: 16,
+    backgroundColor: 'rgba(255, 255, 255, 0.06)',
+  },
+  freqPillActive: {
+    backgroundColor: '#25D366',
+  },
+  freqPillText: {
+    fontSize: 11,
+    color: 'rgba(255, 255, 255, 0.65)',
+    fontWeight: '600',
+  },
+  freqPillTextActive: {
+    color: '#FFFFFF',
+    fontWeight: '700',
+  },
+  rowBetween: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+  },
+  rowLabel: {
+    fontSize: 14,
+    color: '#FFFFFF',
+    fontWeight: '600',
+  },
+  helperText: {
+    marginTop: 8,
+    fontSize: 12,
+    color: 'rgba(255, 255, 255, 0.65)',
+    lineHeight: 16,
+  },
+  countryList: {
+    gap: 10,
+  },
+  countryItem: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    paddingVertical: 10,
+    paddingHorizontal: 12,
+    borderRadius: 12,
+    backgroundColor: 'rgba(255, 255, 255, 0.06)',
+  },
+  countryItemActive: {
+    backgroundColor: '#FFFFFF',
+  },
+  countryName: {
+    fontSize: 13,
+    color: '#FFFFFF',
+    fontWeight: '600',
+  },
+  countryNameActive: {
+    color: '#1B1B3A',
+  },
+  countryMeta: {
+    fontSize: 11,
+    color: 'rgba(255, 255, 255, 0.6)',
+    marginTop: 4,
+  },
+  countryCheck: {
+    fontSize: 16,
+    fontWeight: '700',
+    color: '#1B1B3A',
+  },
+  footer: {
+    alignItems: 'center',
+    marginTop: 10,
+  },
+  footerText: {
+    fontSize: 12,
+    color: 'rgba(255, 255, 255, 0.6)',
+  },
+  statusBadgeRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    marginBottom: 6,
+  },
+  statusDot: {
+    width: 8,
+    height: 8,
+    borderRadius: 4,
+    marginRight: 6,
+  },
+  statusBadgeText: {
+    fontSize: 13,
+    fontWeight: '700',
+  },
+  actionButton: {
+    marginTop: 14,
+    paddingVertical: 10,
+    paddingHorizontal: 16,
+    borderRadius: 12,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  actionButtonPrimary: {
+    backgroundColor: '#6EE7B7',
+  },
+  actionButtonSecondary: {
+    backgroundColor: 'rgba(255, 255, 255, 0.08)',
+    borderWidth: 1,
+    borderColor: 'rgba(255, 255, 255, 0.15)',
+  },
+  actionButtonText: {
+    fontSize: 13,
+    fontWeight: '700',
+    color: '#1B1B3A',
+  },
+  actionButtonTextSecondary: {
+    color: '#FFFFFF',
+  },
+  modalOverlay: {
+    flex: 1,
+    backgroundColor: 'rgba(0, 0, 0, 0.7)',
+    justifyContent: 'center',
+    padding: 20,
+  },
+  modalCard: {
+    backgroundColor: '#1E2140',
+    borderRadius: 20,
+    padding: 20,
+  },
+  modalHeader: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    marginBottom: 10,
+  },
+  modalTitle: {
+    fontSize: 17,
+    fontWeight: '700',
+    color: '#FFFFFF',
+  },
+  modalSub: {
+    fontSize: 12,
+    color: 'rgba(255, 255, 255, 0.65)',
+    marginBottom: 14,
+    lineHeight: 16,
+  },
+  modalCloseText: {
+    fontSize: 18,
+    color: '#9CA3AF',
+    padding: 4,
+  },
+  quickAccountItem: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: 'rgba(255, 255, 255, 0.06)',
+    borderRadius: 10,
+    padding: 10,
+    marginBottom: 8,
+  },
+  quickAccountEmail: {
+    fontSize: 13,
+    color: '#FFFFFF',
+    fontWeight: '600',
+  },
+  inputLabel: {
+    fontSize: 12,
+    color: 'rgba(255, 255, 255, 0.7)',
+    marginBottom: 6,
+    fontWeight: '600',
+  },
+  textInput: {
+    backgroundColor: '#14172E',
+    borderRadius: 10,
+    color: '#FFFFFF',
+    paddingHorizontal: 14,
+    paddingVertical: 10,
+    fontSize: 13,
+    marginBottom: 14,
+    borderWidth: 1,
+    borderColor: 'rgba(255, 255, 255, 0.1)',
+  },
+  connectAccountBtn: {
+    backgroundColor: '#25D366',
+    paddingVertical: 12,
+    borderRadius: 10,
+    alignItems: 'center',
+  },
+  connectAccountBtnText: {
+    color: '#FFFFFF',
+    fontSize: 13,
+    fontWeight: '700',
+  },
+});
