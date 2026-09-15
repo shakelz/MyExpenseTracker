@@ -3,6 +3,7 @@ import {
   ActivityIndicator,
   Alert,
   Modal,
+  NativeModules,
   Pressable,
   ScrollView,
   StyleSheet,
@@ -11,6 +12,7 @@ import {
   TextInput,
   View,
 } from 'react-native';
+import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { getLocalSetting, setLocalSetting } from '../data/localDb';
 
 export type CountryOption = {
@@ -47,6 +49,8 @@ export default function SettingsScreen({
   onExportBackup,
   onRestoreBackup,
 }: SettingsScreenProps) {
+  const safeAreaInsets = useSafeAreaInsets();
+
   // WhatsApp-style Backup State
   const [googleAccount, setGoogleAccount] = useState('shakelz.finance@gmail.com');
   const [isAccountModalOpen, setAccountModalOpen] = useState(false);
@@ -80,6 +84,33 @@ export default function SettingsScreen({
     };
     loadBackupMeta();
   }, []);
+
+  const handleSwitchGoogleAccount = async (email: string) => {
+    if (!email.trim() || !email.includes('@')) {
+      Alert.alert('Invalid Email', 'Please enter a valid Google Account email.');
+      return;
+    }
+    setGoogleAccount(email.trim());
+    await setLocalSetting('backup_google_email', email.trim());
+    setAccountModalOpen(false);
+    Alert.alert('Google Account Connected', `Connected to ${email.trim()} for cloud backup.`);
+  };
+
+  const handleOpenGooglePicker = async () => {
+    try {
+      if (NativeModules.GoogleAuthModule?.chooseGoogleAccount) {
+        const picked = await NativeModules.GoogleAuthModule.chooseGoogleAccount();
+        if (picked) {
+          await handleSwitchGoogleAccount(picked);
+          return;
+        }
+      }
+    } catch (err: any) {
+      console.log('Google account picker cancelled or unavailable:', err?.message || err);
+    }
+    setCustomEmail(googleAccount);
+    setAccountModalOpen(true);
+  };
 
   const handleBackupNow = async () => {
     if (!onExportBackup) return;
@@ -168,19 +199,8 @@ export default function SettingsScreen({
     }
   };
 
-  const handleSwitchGoogleAccount = async (email: string) => {
-    if (!email.trim() || !email.includes('@')) {
-      Alert.alert('Invalid Email', 'Please enter a valid Google Account email.');
-      return;
-    }
-    setGoogleAccount(email.trim());
-    await setLocalSetting('backup_google_email', email.trim());
-    setAccountModalOpen(false);
-    Alert.alert('Google Account Connected', `Connected to ${email.trim()} for cloud backup.`);
-  };
-
   return (
-    <View style={styles.container}>
+    <View style={[styles.container, { paddingTop: safeAreaInsets.top + 14 }]}>
       <ScrollView
         showsVerticalScrollIndicator={false}
         contentContainerStyle={styles.content}
@@ -220,10 +240,7 @@ export default function SettingsScreen({
           {/* Connected Google Account */}
           <Pressable
             style={styles.googleAccountRow}
-            onPress={() => {
-              setCustomEmail(googleAccount);
-              setAccountModalOpen(true);
-            }}
+            onPress={handleOpenGooglePicker}
           >
             <View style={styles.googleIconWrap}>
               <Text style={styles.googleG}>G</Text>
@@ -446,6 +463,29 @@ export default function SettingsScreen({
               Select or enter the Google account to use for automatic cloud backup & restore.
             </Text>
 
+            {/* Native 1-Tap Google Account Picker */}
+            <Pressable
+              style={styles.systemGoogleBtn}
+              onPress={async () => {
+                try {
+                  if (NativeModules.GoogleAuthModule?.chooseGoogleAccount) {
+                    const picked = await NativeModules.GoogleAuthModule.chooseGoogleAccount();
+                    if (picked) {
+                      await handleSwitchGoogleAccount(picked);
+                      return;
+                    }
+                  }
+                } catch {
+                  Alert.alert('Google Account', 'No account chosen.');
+                }
+              }}
+            >
+              <View style={styles.googleIconWrapSmall}>
+                <Text style={{ fontSize: 14, fontWeight: '900', color: '#4285F4' }}>G</Text>
+              </View>
+              <Text style={styles.systemGoogleBtnText}>Choose Google Account on Phone</Text>
+            </Pressable>
+
             {/* Predefined Quick Accounts */}
             <Pressable
               style={styles.quickAccountItem}
@@ -495,18 +535,31 @@ const styles = StyleSheet.create({
   container: {
     flex: 1,
     backgroundColor: '#1B1B3A',
-    paddingHorizontal: 20,
-    paddingTop: 24,
-    paddingBottom: 90,
   },
   content: {
-    paddingBottom: 120,
+    paddingHorizontal: 20,
+    paddingBottom: 40,
   },
   title: {
     fontSize: 22,
     fontWeight: '700',
     color: '#FFFFFF',
     marginBottom: 20,
+  },
+  systemGoogleBtn: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: '#FFFFFF',
+    borderRadius: 12,
+    paddingVertical: 12,
+    paddingHorizontal: 14,
+    marginBottom: 14,
+  },
+  systemGoogleBtnText: {
+    color: '#1F2937',
+    fontSize: 13,
+    fontWeight: '700',
+    flex: 1,
   },
   section: {
     marginBottom: 24,

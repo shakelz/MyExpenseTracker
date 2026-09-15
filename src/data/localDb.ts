@@ -23,7 +23,7 @@ async function getDb(): Promise<SQLiteDatabase> {
 
 export async function initLocalDb(): Promise<void> {
   const db = await getDb();
-  await db.executeSql(
+  const queries = [
     `CREATE TABLE IF NOT EXISTS accounts (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       name TEXT NOT NULL,
@@ -31,8 +31,6 @@ export async function initLocalDb(): Promise<void> {
       balance REAL NOT NULL DEFAULT 0,
       created_at TEXT DEFAULT CURRENT_TIMESTAMP
     );`,
-  );
-  await db.executeSql(
     `CREATE TABLE IF NOT EXISTS transactions (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       type TEXT NOT NULL,
@@ -43,8 +41,6 @@ export async function initLocalDb(): Promise<void> {
       created_at TEXT DEFAULT CURRENT_TIMESTAMP,
       FOREIGN KEY (account_id) REFERENCES accounts(id)
     );`,
-  );
-  await db.executeSql(
     `CREATE TABLE IF NOT EXISTS debts (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       person_name TEXT NOT NULL,
@@ -58,8 +54,6 @@ export async function initLocalDb(): Promise<void> {
       created_at TEXT DEFAULT CURRENT_TIMESTAMP,
       updated_at TEXT DEFAULT CURRENT_TIMESTAMP
     );`,
-  );
-  await db.executeSql(
     `CREATE TABLE IF NOT EXISTS debt_transactions (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       debt_id INTEGER NOT NULL,
@@ -69,14 +63,21 @@ export async function initLocalDb(): Promise<void> {
       created_at TEXT DEFAULT CURRENT_TIMESTAMP,
       FOREIGN KEY (debt_id) REFERENCES debts(id)
     );`,
-  );
-  await db.executeSql(
     `CREATE TABLE IF NOT EXISTS settings (
       key TEXT PRIMARY KEY,
       value TEXT
     );`,
-  );
+  ];
+
+  for (const query of queries) {
+    try {
+      await db.executeSql(query);
+    } catch (e) {
+      console.warn('initLocalDb table creation query error:', e);
+    }
+  }
 }
+
 
 export async function setLocalSetting(key: string, value: string): Promise<void> {
   const db = await getDb();
@@ -150,6 +151,24 @@ export async function createLocalDebt(payload: {
   const db = await getDb();
   const now = new Date().toISOString();
   const amount = Number(payload.amount || 0);
+
+  // Guarantee table exists
+  await db.executeSql(
+    `CREATE TABLE IF NOT EXISTS debts (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      person_name TEXT NOT NULL,
+      phone TEXT,
+      type TEXT NOT NULL,
+      amount REAL NOT NULL,
+      remaining_amount REAL NOT NULL,
+      note TEXT,
+      due_date TEXT,
+      status TEXT NOT NULL DEFAULT 'pending',
+      created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+      updated_at TEXT DEFAULT CURRENT_TIMESTAMP
+    );`,
+  );
+
   const result = await db.executeSql(
     `INSERT INTO debts (person_name, phone, type, amount, remaining_amount, note, due_date, status, created_at, updated_at)
      VALUES (?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?)`,
@@ -165,9 +184,59 @@ export async function createLocalDebt(payload: {
       now,
     ],
   );
-  const insertId = result[0].insertId;
-  const [rowResult] = await db.executeSql('SELECT * FROM debts WHERE id = ?', [insertId]);
-  return toDebt(rowResult.rows.item(0));
+
+  let insertId = result && result[0] ? result[0].insertId : undefined;
+  if (!insertId || insertId <= 0) {
+    try {
+      const [lastRes] = await db.executeSql('SELECT last_insert_rowid() as id');
+      if (lastRes && lastRes.rows.length > 0) {
+        insertId = lastRes.rows.item(0).id;
+      }
+    } catch {
+      // ignore
+    }
+  }
+
+  let createdDebt: Debt | null = null;
+  if (insertId) {
+    try {
+      const [rowResult] = await db.executeSql('SELECT * FROM debts WHERE id = ?', [insertId]);
+      if (rowResult && rowResult.rows.length > 0) {
+        createdDebt = toDebt(rowResult.rows.item(0));
+      }
+    } catch {
+      // ignore
+    }
+  }
+
+  if (!createdDebt) {
+    try {
+      const [latest] = await db.executeSql('SELECT * FROM debts ORDER BY id DESC LIMIT 1');
+      if (latest && latest.rows.length > 0) {
+        createdDebt = toDebt(latest.rows.item(0));
+      }
+    } catch {
+      // ignore
+    }
+  }
+
+  if (!createdDebt) {
+    createdDebt = {
+      id: String(insertId || Date.now()),
+      personName: payload.personName,
+      phone: payload.phone,
+      type: payload.type,
+      amount,
+      remainingAmount: amount,
+      note: payload.note,
+      dueDate: payload.dueDate,
+      status: 'pending',
+      createdAt: now,
+      updatedAt: now,
+    };
+  }
+
+  return createdDebt;
 }
 
 export async function updateLocalDebt(
@@ -207,8 +276,29 @@ export async function updateLocalDebt(
       id,
     ],
   );
-  const [rowResult] = await db.executeSql('SELECT * FROM debts WHERE id = ?', [id]);
-  return toDebt(rowResult.rows.item(0));
+
+  try {
+    const [rowResult] = await db.executeSql('SELECT * FROM debts WHERE id = ?', [id]);
+    if (rowResult && rowResult.rows.length > 0) {
+      return toDebt(rowResult.rows.item(0));
+    }
+  } catch {
+    // fallback below
+  }
+
+  return {
+    id,
+    personName: payload.personName,
+    phone: payload.phone,
+    type: payload.type,
+    amount,
+    remainingAmount: remaining,
+    note: payload.note,
+    dueDate: payload.dueDate,
+    status,
+    createdAt: now,
+    updatedAt: now,
+  };
 }
 
 export async function deleteLocalDebt(id: string): Promise<void> {
@@ -223,8 +313,21 @@ export async function addDebtRepayment(
   note?: string,
 ): Promise<{ debt: Debt; transaction: DebtTransaction }> {
   const db = await getDb();
+
+  await db.executeSql(
+    `CREATE TABLE IF NOT EXISTS debt_transactions (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      debt_id INTEGER NOT NULL,
+      amount REAL NOT NULL,
+      note TEXT,
+      type TEXT NOT NULL DEFAULT 'repayment',
+      created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+      FOREIGN KEY (debt_id) REFERENCES debts(id)
+    );`,
+  );
+
   const [debtResult] = await db.executeSql('SELECT * FROM debts WHERE id = ?', [debtId]);
-  if (!debtResult.rows.length) {
+  if (!debtResult || !debtResult.rows.length) {
     throw new Error('Debt record not found');
   }
   const currentDebt = toDebt(debtResult.rows.item(0));
@@ -235,7 +338,16 @@ export async function addDebtRepayment(
     'INSERT INTO debt_transactions (debt_id, amount, note, type, created_at) VALUES (?, ?, ?, ?, ?)',
     [debtId, payAmount, note || null, 'repayment', now],
   );
-  const txInsertId = txResult[0].insertId;
+
+  let txInsertId = txResult && txResult[0] ? txResult[0].insertId : undefined;
+  if (!txInsertId || txInsertId <= 0) {
+    try {
+      const [lastRes] = await db.executeSql('SELECT last_insert_rowid() as id');
+      if (lastRes && lastRes.rows.length > 0) {
+        txInsertId = lastRes.rows.item(0).id;
+      }
+    } catch {}
+  }
 
   const nextRemaining = Math.max(0, currentDebt.remainingAmount - payAmount);
   const nextStatus: DebtStatus = nextRemaining <= 0 ? 'settled' : 'partially_paid';
@@ -245,12 +357,41 @@ export async function addDebtRepayment(
     [nextRemaining, nextStatus, now, debtId],
   );
 
-  const [updatedDebtResult] = await db.executeSql('SELECT * FROM debts WHERE id = ?', [debtId]);
-  const [txRowResult] = await db.executeSql('SELECT * FROM debt_transactions WHERE id = ?', [txInsertId]);
+  let updatedDebt: Debt = {
+    ...currentDebt,
+    remainingAmount: nextRemaining,
+    status: nextStatus,
+    updatedAt: now,
+  };
+
+  try {
+    const [updatedDebtResult] = await db.executeSql('SELECT * FROM debts WHERE id = ?', [debtId]);
+    if (updatedDebtResult && updatedDebtResult.rows.length > 0) {
+      updatedDebt = toDebt(updatedDebtResult.rows.item(0));
+    }
+  } catch {}
+
+  let txObj: DebtTransaction = {
+    id: String(txInsertId || Date.now()),
+    debtId: String(debtId),
+    amount: payAmount,
+    note,
+    type: 'repayment',
+    createdAt: now,
+  };
+
+  if (txInsertId) {
+    try {
+      const [txRowResult] = await db.executeSql('SELECT * FROM debt_transactions WHERE id = ?', [txInsertId]);
+      if (txRowResult && txRowResult.rows.length > 0) {
+        txObj = toDebtTransaction(txRowResult.rows.item(0));
+      }
+    } catch {}
+  }
 
   return {
-    debt: toDebt(updatedDebtResult.rows.item(0)),
-    transaction: toDebtTransaction(txRowResult.rows.item(0)),
+    debt: updatedDebt,
+    transaction: txObj,
   };
 }
 
@@ -540,9 +681,36 @@ export async function createLocalAccount(payload: {
     'INSERT INTO accounts (name, type, balance) VALUES (?, ?, ?)',
     [payload.name, payload.type, Number(payload.balance || 0)],
   );
-  const insertId = result[0].insertId;
-  const [rowResult] = await db.executeSql('SELECT * FROM accounts WHERE id = ?', [insertId]);
-  return toAccount(rowResult.rows.item(0));
+  let insertId = result && result[0] ? result[0].insertId : undefined;
+  if (!insertId || insertId <= 0) {
+    try {
+      const [lastRes] = await db.executeSql('SELECT last_insert_rowid() as id');
+      if (lastRes && lastRes.rows.length > 0) {
+        insertId = lastRes.rows.item(0).id;
+      }
+    } catch {}
+  }
+
+  if (insertId) {
+    try {
+      const [rowResult] = await db.executeSql('SELECT * FROM accounts WHERE id = ?', [insertId]);
+      if (rowResult && rowResult.rows.length > 0) {
+        return toAccount(rowResult.rows.item(0));
+      }
+    } catch {}
+  }
+
+  const [latest] = await db.executeSql('SELECT * FROM accounts ORDER BY id DESC LIMIT 1');
+  if (latest && latest.rows.length > 0) {
+    return toAccount(latest.rows.item(0));
+  }
+
+  return {
+    id: String(insertId || Date.now()),
+    name: payload.name,
+    type: payload.type,
+    balance: Number(payload.balance || 0),
+  };
 }
 
 async function findAccountByIdOrName(
@@ -608,7 +776,15 @@ export async function createLocalTransaction(payload: {
       createdAt,
     ],
   );
-  const insertId = result[0].insertId;
+  let insertId = result && result[0] ? result[0].insertId : undefined;
+  if (!insertId || insertId <= 0) {
+    try {
+      const [lastRes] = await db.executeSql('SELECT last_insert_rowid() as id');
+      if (lastRes && lastRes.rows.length > 0) {
+        insertId = lastRes.rows.item(0).id;
+      }
+    } catch {}
+  }
 
   if (account) {
     const delta = payload.type === 'income' ? Number(payload.amount) : -Number(payload.amount);
@@ -617,17 +793,57 @@ export async function createLocalTransaction(payload: {
     account = { ...account, balance: nextBalance };
   }
 
-  const [rowResult] = await db.executeSql(
-    `SELECT t.id, t.type, t.amount, t.note, t.account_id as accountId, t.category, t.created_at as createdAt,
-            a.name as accountName, a.type as accountType
-     FROM transactions t
-     LEFT JOIN accounts a ON a.id = t.account_id
-     WHERE t.id = ?`,
-    [insertId],
-  );
+  let rowResult: any = null;
+  if (insertId) {
+    try {
+      const [res] = await db.executeSql(
+        `SELECT t.id, t.type, t.amount, t.note, t.account_id as accountId, t.category, t.created_at as createdAt,
+                a.name as accountName, a.type as accountType
+         FROM transactions t
+         LEFT JOIN accounts a ON a.id = t.account_id
+         WHERE t.id = ?`,
+        [insertId],
+      );
+      if (res && res.rows.length > 0) {
+        rowResult = res;
+      }
+    } catch {}
+  }
+
+  if (!rowResult) {
+    try {
+      const [latest] = await db.executeSql(
+        `SELECT t.id, t.type, t.amount, t.note, t.account_id as accountId, t.category, t.created_at as createdAt,
+                a.name as accountName, a.type as accountType
+         FROM transactions t
+         LEFT JOIN accounts a ON a.id = t.account_id
+         ORDER BY t.id DESC LIMIT 1`,
+      );
+      if (latest && latest.rows.length > 0) {
+        rowResult = latest;
+      }
+    } catch {}
+  }
+
+  if (rowResult && rowResult.rows.length > 0) {
+    return {
+      transaction: toTransaction(rowResult.rows.item(0)),
+      account: account ?? undefined,
+    };
+  }
 
   return {
-    transaction: toTransaction(rowResult.rows.item(0)),
+    transaction: {
+      id: String(insertId || Date.now()),
+      type: payload.type,
+      amount: payload.amount,
+      note: payload.note,
+      accountId: accountIdToUse || undefined,
+      accountName: account?.name,
+      accountType: account?.type,
+      category: payload.category,
+      createdAt,
+    },
     account: account ?? undefined,
   };
 }

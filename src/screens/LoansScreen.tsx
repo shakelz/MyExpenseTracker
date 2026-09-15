@@ -168,8 +168,10 @@ export default function LoansScreen({
         dueDate: dueDate.trim() || undefined,
       });
       setAddModalOpen(false);
-    } catch {
-      Alert.alert('Error', 'Failed to save loan record');
+      Alert.alert('Record Saved', `Successfully added "${personName.trim()}" to your Hisaab.`);
+    } catch (err: any) {
+      console.error('Failed to add debt:', err);
+      Alert.alert('Error', `Failed to save loan record: ${err?.message || 'Unknown error'}`);
     }
   };
 
@@ -208,8 +210,10 @@ export default function LoansScreen({
     try {
       await onAddRepayment(selectedDebt.id, numAmount, paymentNote.trim() || undefined);
       setPaymentModalOpen(false);
-    } catch {
-      Alert.alert('Error', 'Failed to record payment');
+      Alert.alert('Payment Recorded', `Successfully recorded payment of ${formatCurrency(numAmount)}.`);
+    } catch (err: any) {
+      console.error('Failed to record repayment:', err);
+      Alert.alert('Error', `Failed to record payment: ${err?.message || 'Unknown error'}`);
     }
   };
 

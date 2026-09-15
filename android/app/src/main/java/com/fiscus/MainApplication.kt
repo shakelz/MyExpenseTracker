@@ -6,6 +6,7 @@ import com.facebook.react.ReactApplication
 import com.facebook.react.ReactHost
 import com.facebook.react.ReactNativeApplicationEntryPoint.loadReactNative
 import com.facebook.react.defaults.DefaultReactHost.getDefaultReactHost
+import com.fiscus.auth.GoogleAuthPackage
 import com.fiscus.bubble.SystemBubblePackage
 import com.fiscus.notification.BankNotificationPackage
 
@@ -20,6 +21,7 @@ class MainApplication : Application(), ReactApplication {
           // add(MyReactNativePackage())
           add(SystemBubblePackage())
           add(BankNotificationPackage())
+          add(GoogleAuthPackage())
         },
     )
   }

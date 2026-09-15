@@ -284,13 +284,15 @@ function AppContent() {
     note?: string;
     dueDate?: string;
   }) => {
-    const created = await createLocalDebt(payload);
-    setDebts(current => [created, ...current]);
+    await createLocalDebt(payload);
+    const updated = await fetchLocalDebts();
+    setDebts(updated);
   };
 
   const handleAddRepayment = async (debtId: string, amount: number, note?: string) => {
-    const { debt: updatedDebt } = await addDebtRepayment(debtId, amount, note);
-    setDebts(current => current.map(d => (d.id === debtId ? updatedDebt : d)));
+    await addDebtRepayment(debtId, amount, note);
+    const updated = await fetchLocalDebts();
+    setDebts(updated);
   };
 
   const handleDeleteDebt = async (debtId: string) => {
@@ -1306,7 +1308,7 @@ const styles = StyleSheet.create({
     borderRadius: 16,
     padding: 12,
     marginBottom: 10,
-    marginHorizontal: 4,
+    marginHorizontal: 20,
     flexDirection: 'row',
     alignItems: 'center',
   },
