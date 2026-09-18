@@ -14,15 +14,36 @@ type SQLiteDatabase = any;
 
 let dbPromise: Promise<SQLiteDatabase> | null = null;
 
-async function getDb(): Promise<SQLiteDatabase> {
-  if (!dbPromise) {
-    dbPromise = SQLite.openDatabase({ name: 'fiscus.db', location: 'default' });
+async function ensureColumns(
+  db: SQLiteDatabase,
+  tableName: string,
+  requiredColumns: Record<string, string>,
+): Promise<void> {
+  try {
+    const [res] = await db.executeSql(`PRAGMA table_info(${tableName});`);
+    const existingCols = new Set<string>();
+    for (let i = 0; i < res.rows.length; i++) {
+      const col = res.rows.item(i);
+      if (col && col.name) {
+        existingCols.add(col.name.toLowerCase());
+      }
+    }
+    for (const [colName, colDef] of Object.entries(requiredColumns)) {
+      if (!existingCols.has(colName.toLowerCase())) {
+        try {
+          await db.executeSql(`ALTER TABLE ${tableName} ADD COLUMN ${colName} ${colDef};`);
+          console.log(`Added column ${colName} to ${tableName}`);
+        } catch (alterErr) {
+          console.warn(`Could not add column ${colName} to ${tableName}:`, alterErr);
+        }
+      }
+    }
+  } catch (err) {
+    console.warn(`PRAGMA table_info failed for ${tableName}:`, err);
   }
-  return dbPromise;
 }
 
-export async function initLocalDb(): Promise<void> {
-  const db = await getDb();
+export async function ensureTablesAndMigrations(db: SQLiteDatabase): Promise<void> {
   const queries = [
     `CREATE TABLE IF NOT EXISTS accounts (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -73,9 +94,68 @@ export async function initLocalDb(): Promise<void> {
     try {
       await db.executeSql(query);
     } catch (e) {
-      console.warn('initLocalDb table creation query error:', e);
+      console.warn('Table creation query error:', e);
     }
   }
+
+  // Auto-migrate tables with missing columns
+  await ensureColumns(db, 'debts', {
+    phone: 'TEXT',
+    remaining_amount: 'REAL DEFAULT 0',
+    note: 'TEXT',
+    due_date: 'TEXT',
+    status: "TEXT DEFAULT 'pending'",
+    created_at: 'TEXT DEFAULT CURRENT_TIMESTAMP',
+    updated_at: 'TEXT DEFAULT CURRENT_TIMESTAMP',
+  });
+
+  await ensureColumns(db, 'debt_transactions', {
+    type: "TEXT DEFAULT 'repayment'",
+    note: 'TEXT',
+    created_at: 'TEXT DEFAULT CURRENT_TIMESTAMP',
+  });
+
+  await ensureColumns(db, 'transactions', {
+    category: 'TEXT',
+    account_id: 'INTEGER',
+    note: 'TEXT',
+  });
+
+  await ensureColumns(db, 'accounts', {
+    balance: 'REAL DEFAULT 0',
+    type: 'TEXT',
+  });
+
+  // Ensure NULL values in existing debts are filled
+  try {
+    await db.executeSql(
+      'UPDATE debts SET remaining_amount = amount WHERE remaining_amount IS NULL;',
+    );
+    await db.executeSql(
+      "UPDATE debts SET status = 'pending' WHERE status IS NULL OR status = '';",
+    );
+    await db.executeSql(
+      "UPDATE debts SET updated_at = created_at WHERE updated_at IS NULL OR updated_at = '';",
+    );
+  } catch (e) {
+    // ignore
+  }
+}
+
+async function getDb(): Promise<SQLiteDatabase> {
+  if (!dbPromise) {
+    dbPromise = (async () => {
+      const db = await SQLite.openDatabase({ name: 'fiscus.db', location: 'default' });
+      await ensureTablesAndMigrations(db);
+      return db;
+    })();
+  }
+  return dbPromise;
+}
+
+export async function initLocalDb(): Promise<void> {
+  const db = await getDb();
+  await ensureTablesAndMigrations(db);
 }
 
 
@@ -129,10 +209,19 @@ const toDebtTransaction = (row: any): DebtTransaction => ({
 
 export async function fetchLocalDebts(): Promise<Debt[]> {
   const db = await getDb();
-  const [result] = await db.executeSql(
-    'SELECT * FROM debts ORDER BY updated_at DESC, id DESC',
-  );
-  const rows = result.rows;
+  let result;
+  try {
+    [result] = await db.executeSql(
+      'SELECT * FROM debts ORDER BY updated_at DESC, id DESC',
+    );
+  } catch {
+    try {
+      [result] = await db.executeSql('SELECT * FROM debts ORDER BY id DESC');
+    } catch {
+      return [];
+    }
+  }
+  const rows = result ? result.rows : { length: 0 };
   const list: Debt[] = [];
   for (let i = 0; i < rows.length; i += 1) {
     list.push(toDebt(rows.item(i)));
@@ -152,22 +241,16 @@ export async function createLocalDebt(payload: {
   const now = new Date().toISOString();
   const amount = Number(payload.amount || 0);
 
-  // Guarantee table exists
-  await db.executeSql(
-    `CREATE TABLE IF NOT EXISTS debts (
-      id INTEGER PRIMARY KEY AUTOINCREMENT,
-      person_name TEXT NOT NULL,
-      phone TEXT,
-      type TEXT NOT NULL,
-      amount REAL NOT NULL,
-      remaining_amount REAL NOT NULL,
-      note TEXT,
-      due_date TEXT,
-      status TEXT NOT NULL DEFAULT 'pending',
-      created_at TEXT DEFAULT CURRENT_TIMESTAMP,
-      updated_at TEXT DEFAULT CURRENT_TIMESTAMP
-    );`,
-  );
+  // Guarantee columns exist
+  await ensureColumns(db, 'debts', {
+    phone: 'TEXT',
+    remaining_amount: 'REAL DEFAULT 0',
+    note: 'TEXT',
+    due_date: 'TEXT',
+    status: "TEXT DEFAULT 'pending'",
+    created_at: 'TEXT DEFAULT CURRENT_TIMESTAMP',
+    updated_at: 'TEXT DEFAULT CURRENT_TIMESTAMP',
+  });
 
   const result = await db.executeSql(
     `INSERT INTO debts (person_name, phone, type, amount, remaining_amount, note, due_date, status, created_at, updated_at)
@@ -465,7 +548,13 @@ export async function restoreFullBackupData(
   }
 
   const db = await getDb();
+  await ensureTablesAndMigrations(db);
   const { accounts = [], transactions = [], debts = [], debtTransactions = [], settings = {} } = parsed.data;
+
+  // Temporarily disable foreign keys during bulk restore
+  try {
+    await db.executeSql('PRAGMA foreign_keys = OFF;');
+  } catch {}
 
   // Clear existing tables
   await db.executeSql('DELETE FROM debt_transactions');
@@ -525,6 +614,10 @@ export async function restoreFullBackupData(
       [key, String(value)],
     );
   }
+
+  try {
+    await db.executeSql('PRAGMA foreign_keys = ON;');
+  } catch {}
 
   return {
     success: true,
@@ -746,7 +839,8 @@ export async function createLocalTransaction(payload: {
   accountType?: Account['type'];
   createdAt?: string;
   category?: string;
-}): Promise<{ transaction: QuickTransaction; account?: Account }> {
+  deduplicate?: boolean;
+}): Promise<{ transaction: QuickTransaction; account?: Account; isDuplicate?: boolean }> {
   const db = await getDb();
   let account = await findAccountByIdOrName(
     db,
@@ -754,6 +848,30 @@ export async function createLocalTransaction(payload: {
     payload.accountName,
     payload.accountType,
   );
+
+  // Database-Level Deduplication Check (Window: 3 minutes = 180s)
+  if (payload.deduplicate) {
+    const windowStart = new Date(Date.now() - 180 * 1000).toISOString();
+    try {
+      const [existing] = await db.executeSql(
+        `SELECT t.id, t.type, t.amount, t.note, t.account_id as accountId, t.category, t.created_at as createdAt,
+                a.name as accountName, a.type as accountType
+         FROM transactions t
+         LEFT JOIN accounts a ON a.id = t.account_id
+         WHERE t.type = ? AND ABS(t.amount - ?) < 0.01 AND t.created_at >= ?
+         ORDER BY t.id DESC LIMIT 1`,
+        [payload.type, payload.amount, windowStart],
+      );
+      if (existing && existing.rows.length > 0) {
+        console.log('[LocalDb] Duplicate transaction detected within 3 mins window, suppressing duplicate:', payload);
+        const existingTx = toTransaction(existing.rows.item(0));
+        return { transaction: existingTx, account: account ?? undefined, isDuplicate: true };
+      }
+    } catch (e) {
+      console.warn('[LocalDb] Deduplication query error:', e);
+    }
+  }
+
   if (!account && payload.accountName && payload.accountType) {
     const created = await createLocalAccount({
       name: payload.accountName,

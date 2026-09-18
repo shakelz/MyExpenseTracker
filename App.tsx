@@ -374,35 +374,30 @@ function AppContent() {
   };
 
   const mergePendingTransactions = async (items: QuickTransaction[]) => {
-    setTransactions(current => [...items, ...current]);
-    setAccounts(current => {
-      let updated = [...current];
-      items.forEach(item => {
-        const accountName = item.accountName?.trim();
-        const accountType = item.accountType;
-        if (!accountName || !accountType) {
-          return;
-        }
-        let account = updated.find(
-          candidate =>
-            candidate.name.toLowerCase() === accountName.toLowerCase() &&
-            candidate.type === accountType,
-        );
-        if (!account) {
-          account = {
-            id: `acc-${Date.now()}-${Math.random()}`,
-            name: accountName,
-            type: accountType,
-            balance: 0,
-          };
-          updated = [account, ...updated];
-        }
-        const delta = item.type === 'income' ? item.amount : -item.amount;
-        account.balance += delta;
-      });
-      return updated;
-    });
+    if (!items || items.length === 0) return;
+
+    // 1. Deduplicate items within the incoming batch itself (window: 3 mins / 180s)
+    const dedupedItems: QuickTransaction[] = [];
     for (const item of items) {
+      const itemTime = new Date(item.createdAt || Date.now()).getTime();
+      const isDuplicateInBatch = dedupedItems.some(existing => {
+        const existingTime = new Date(existing.createdAt || Date.now()).getTime();
+        const sameAmount = Math.abs(Number(existing.amount) - Number(item.amount)) < 0.01;
+        const sameType = existing.type === item.type;
+        const timeDiff = Math.abs(existingTime - itemTime);
+        return sameAmount && sameType && timeDiff < 180_000;
+      });
+
+      if (!isDuplicateInBatch) {
+        dedupedItems.push(item);
+      } else {
+        console.log('[App] Duplicate transaction suppressed in incoming batch:', item);
+      }
+    }
+
+    // 2. Persist to SQLite with database-level deduplication
+    let hasNewTransactions = false;
+    for (const item of dedupedItems) {
       try {
         const result = await createLocalTransaction({
           type: item.type,
@@ -413,31 +408,28 @@ function AppContent() {
           accountType: item.accountType,
           createdAt: item.createdAt,
           category: item.category,
+          deduplicate: true,
         });
-        setTransactions(current =>
-          current.map(entry =>
-            entry.id === item.id ? result.transaction : entry,
-          ),
-        );
-        if (result.account) {
-          setAccounts(current =>
-            current.map(entry =>
-              entry.id === result.account!.id ? result.account! : entry,
-            ),
-          );
+
+        if (!result.isDuplicate) {
+          hasNewTransactions = true;
         }
-      } catch {
-        // ignore local sync errors
+      } catch (err) {
+        console.warn('[App] Error saving pending transaction:', err);
       }
     }
-    try {
-      const [freshAccounts, freshTxs] = await Promise.all([
-        fetchLocalAccounts(),
-        fetchLocalTransactions(),
-      ]);
-      setAccounts(freshAccounts);
-      setTransactions(freshTxs);
-    } catch {}
+
+    // 3. Refresh accounts and transactions authoritative from SQLite DB
+    if (hasNewTransactions || dedupedItems.length > 0) {
+      try {
+        const [freshAccounts, freshTxs] = await Promise.all([
+          fetchLocalAccounts(),
+          fetchLocalTransactions(),
+        ]);
+        setAccounts(freshAccounts);
+        setTransactions(freshTxs);
+      } catch {}
+    }
   };
 
   const findAccountIdByDetails = (
@@ -1320,14 +1312,14 @@ const styles = StyleSheet.create({
   },
   list: {
     paddingHorizontal: 20,
-    paddingBottom: 100,
+    paddingBottom: 120,
   },
   transactionCard: {
     backgroundColor: '#FFFFFF',
     borderRadius: 16,
     padding: 12,
     marginBottom: 10,
-    marginHorizontal: 20,
+    marginHorizontal: 28,
     flexDirection: 'row',
     alignItems: 'center',
   },
