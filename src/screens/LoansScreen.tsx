@@ -2,6 +2,7 @@ import React, { useMemo, useState } from 'react';
 import {
   Alert,
   FlatList,
+  Keyboard,
   Linking,
   Modal,
   Pressable,
@@ -148,7 +149,9 @@ export default function LoansScreen({
   };
 
   const handleSubmitAdd = async () => {
-    const numAmount = parseFloat(amount);
+    Keyboard.dismiss();
+    const cleanAmount = (amount || '').replace(/,/g, '.').trim();
+    const numAmount = parseFloat(cleanAmount);
     if (!personName.trim()) {
       Alert.alert('Required', 'Please enter a person name');
       return;
@@ -184,7 +187,9 @@ export default function LoansScreen({
 
   const handleSubmitPayment = async () => {
     if (!selectedDebt) return;
-    const numAmount = parseFloat(paymentAmount);
+    Keyboard.dismiss();
+    const cleanAmount = (paymentAmount || '').replace(/,/g, '.').trim();
+    const numAmount = parseFloat(cleanAmount);
     if (isNaN(numAmount) || numAmount <= 0) {
       Alert.alert('Required', 'Please enter a valid payment amount');
       return;
@@ -634,7 +639,11 @@ export default function LoansScreen({
               </Pressable>
             </View>
 
-            <ScrollView showsVerticalScrollIndicator={false}>
+            <ScrollView
+              showsVerticalScrollIndicator={false}
+              keyboardShouldPersistTaps="handled"
+              contentContainerStyle={{ paddingBottom: 60 }}
+            >
               {/* Type Switcher */}
               <View style={styles.modalTypeRow}>
                 <Pressable

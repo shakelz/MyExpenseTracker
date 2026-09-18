@@ -1,5 +1,6 @@
 import React, { useEffect, useMemo, useState } from 'react';
 import {
+  Alert,
   Animated,
   Easing,
   Keyboard,
@@ -134,6 +135,25 @@ export default function QuickTransactionSheet({
     onClose();
   };
 
+  const handleDeletePrompt = () => {
+    if (!initialValue || !onDelete) return;
+    Alert.alert(
+      'Delete Transaction',
+      'Are you sure you want to delete this transaction?',
+      [
+        { text: 'Cancel', style: 'cancel' },
+        {
+          text: 'Delete',
+          style: 'destructive',
+          onPress: () => {
+            onDelete(initialValue);
+            onClose();
+          },
+        },
+      ],
+    );
+  };
+
   if (!visible && !embedded) {
     return null;
   }
@@ -145,7 +165,20 @@ export default function QuickTransactionSheet({
       showsVerticalScrollIndicator={false}
     >
       <View style={styles.handle} />
-      <Text style={styles.title}>Quick transaction</Text>
+      <View style={styles.headerRow}>
+        <Text style={styles.title}>
+          {initialValue ? 'Edit Transaction' : 'Quick transaction'}
+        </Text>
+        {initialValue && onDelete && (
+          <Pressable
+            style={styles.headerDeleteBtn}
+            onPress={handleDeletePrompt}
+          >
+            <Text style={styles.headerDeleteIcon}>🗑️</Text>
+            <Text style={styles.headerDeleteText}>Delete</Text>
+          </Pressable>
+        )}
+      </View>
       <View style={styles.toggleRow}>
         <Pressable
           onPress={() => setType('expense')}
@@ -253,7 +286,7 @@ export default function QuickTransactionSheet({
         <Text style={styles.submitText}>Save Transaction</Text>
       </Pressable>
       {initialValue && onDelete && (
-        <Pressable style={styles.deleteButton} onPress={() => onDelete(initialValue)}>
+        <Pressable style={styles.deleteButton} onPress={handleDeletePrompt}>
           <Text style={styles.deleteText}>Delete Transaction</Text>
         </Pressable>
       )}
@@ -327,11 +360,34 @@ const styles = StyleSheet.create({
     alignSelf: 'center',
     marginBottom: 12,
   },
+  headerRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    marginBottom: 16,
+  },
+  headerDeleteBtn: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: '#FEE2E2',
+    paddingHorizontal: 12,
+    paddingVertical: 6,
+    borderRadius: 10,
+    gap: 4,
+  },
+  headerDeleteIcon: {
+    fontSize: 14,
+  },
+  headerDeleteText: {
+    fontSize: 13,
+    fontWeight: '700',
+    color: '#E11D48',
+  },
   title: {
     fontSize: 20,
     fontWeight: '700',
     color: '#101628',
-    marginBottom: 16,
+    marginBottom: 0,
   },
   toggleRow: {
     flexDirection: 'row',

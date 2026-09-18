@@ -24,6 +24,9 @@ import {
 } from 'react-native-safe-area-context';
 import QuickTransactionSheet from './src/components/QuickTransactionSheet';
 import AccountSheet from './src/components/AccountSheet';
+import TransactionCard from './src/components/TransactionCard';
+import TransactionActionModal from './src/components/TransactionActionModal';
+import UndoSnackbar from './src/components/UndoSnackbar';
 import { Account, Debt, DebtTransaction, DebtType, QuickTransaction } from './src/data/models';
 import AnalysisScreen from './src/screens/AnalysisScreen';
 import LoansScreen from './src/screens/LoansScreen';
@@ -98,6 +101,18 @@ function AppContent() {
     QuickTransaction | null
   >(null);
   const [editingAccount, setEditingAccount] = useState<Account | null>(null);
+  const [actionModalTransaction, setActionModalTransaction] =
+    useState<QuickTransaction | null>(null);
+  const [undoSnackbar, setUndoSnackbar] = useState<{
+    visible: boolean;
+    message: string;
+    deletedItem: QuickTransaction | null;
+  }>({
+    visible: false,
+    message: '',
+    deletedItem: null,
+  });
+  const [showAllRecent, setShowAllRecent] = useState(false);
   const [hasOverlayPermission, setHasOverlayPermission] = useState(false);
   const [bubbleEnabled, setBubbleEnabled] = useState(false);
   const [isNotificationAccessGranted, setNotificationAccessGranted] =
@@ -148,6 +163,10 @@ function AppContent() {
       ),
     [currentMonthIndex, transactions],
   );
+
+  const displayedTransactions = useMemo(() => {
+    return showAllRecent ? transactions : currentMonthTransactions;
+  }, [showAllRecent, transactions, currentMonthTransactions]);
 
   useEffect(() => {
     let isMounted = true;
@@ -636,6 +655,72 @@ function AppContent() {
     }
     setEditingTransaction(null);
     setQuickAddOpen(false);
+    setActionModalTransaction(null);
+
+    const desc = entry.note || entry.category || (entry.type === 'income' ? 'Income' : 'Expense');
+    setUndoSnackbar({
+      visible: true,
+      message: `🗑️ Deleted ${desc} (${currencySymbol}${entry.amount.toFixed(2)})`,
+      deletedItem: entry,
+    });
+  };
+
+  const handleUndoDelete = async () => {
+    if (!undoSnackbar.deletedItem) return;
+    const entry = undoSnackbar.deletedItem;
+    setUndoSnackbar({ visible: false, message: '', deletedItem: null });
+
+    try {
+      const result = await createLocalTransaction({
+        type: entry.type,
+        amount: entry.amount,
+        note: entry.note || '',
+        accountId: entry.accountId,
+        accountName: entry.accountName,
+        accountType: entry.accountType,
+        createdAt: entry.createdAt,
+        category: entry.category,
+      });
+      setTransactions(current => [result.transaction, ...current]);
+      if (result.account) {
+        setAccounts(current =>
+          current.map(item =>
+            item.id === result.account!.id ? result.account! : item,
+          ),
+        );
+      }
+    } catch (err) {
+      console.warn('Failed to restore deleted transaction:', err);
+    }
+  };
+
+  const handleDuplicateTransaction = async (item: QuickTransaction) => {
+    try {
+      const result = await createLocalTransaction({
+        type: item.type,
+        amount: item.amount,
+        note: item.note ? `${item.note} (Copy)` : '',
+        accountId: item.accountId,
+        accountName: item.accountName,
+        accountType: item.accountType,
+        createdAt: new Date().toISOString(),
+        category: item.category,
+      });
+      setTransactions(current => [result.transaction, ...current]);
+      if (result.account) {
+        setAccounts(current =>
+          current.map(a => (a.id === result.account!.id ? result.account! : a)),
+        );
+      }
+      setActionModalTransaction(null);
+      setUndoSnackbar({
+        visible: true,
+        message: `📋 Duplicated "${item.note || item.category || 'Transaction'}"`,
+        deletedItem: null,
+      });
+    } catch (err) {
+      console.warn('Failed to duplicate transaction:', err);
+    }
   };
 
   return (
@@ -674,7 +759,7 @@ function AppContent() {
       ) : (
         <>
           <FlatList
-            data={currentMonthTransactions}
+            data={displayedTransactions}
             keyExtractor={item => item.id}
             contentContainerStyle={styles.scrollContent}
             showsVerticalScrollIndicator={false}
@@ -796,58 +881,41 @@ function AppContent() {
                 />
 
                 <View style={styles.sectionHeader}>
-                  <Text style={styles.sectionTitle}>Recent Transactions</Text>
-                  <Pressable>
-                    <Text style={styles.seeAllButton}>See All</Text>
+                  <View>
+                    <Text style={styles.sectionTitle}>Recent Transactions</Text>
+                    <Text style={styles.sectionHint}>
+                      Swipe ↔️ or hold for smart actions
+                    </Text>
+                  </View>
+                  <Pressable onPress={() => setShowAllRecent(prev => !prev)}>
+                    <Text style={styles.seeAllButton}>
+                      {showAllRecent ? 'Show Less' : 'See All'}
+                    </Text>
                   </Pressable>
                 </View>
               </View>
             }
             ListEmptyComponent={
               <Text style={styles.emptyText}>
-                No transactions this month.
+                No transactions {showAllRecent ? 'recorded' : 'this month'}.
               </Text>
             }
             renderItem={({ item }) => (
-              <Pressable
-                style={styles.transactionCard}
-                onPress={() => {
-                  setEditingTransaction(item);
+              <TransactionCard
+                item={item}
+                currencySymbol={currencySymbol}
+                formatCurrency={formatCurrency}
+                onPress={entry => {
+                  setEditingTransaction(entry);
                   setQuickAddOpen(true);
                 }}
-              >
-                <View style={styles.transactionIcon}>
-                  <Text style={styles.transactionIconText}>
-                    {item.type === 'income' ? '💳' : '🛒'}
-                  </Text>
-                </View>
-                <View style={styles.transactionInfo}>
-                  <Text style={styles.transactionTitle}>
-                    {item.note ||
-                      (item.type === 'income' ? 'Income' : 'Expense')}
-                  </Text>
-                  <Text style={styles.transactionMeta}>
-                    {new Date(item.createdAt).toLocaleDateString('en-GB', {
-                      day: '2-digit',
-                      month: 'short',
-                      year: 'numeric',
-                    })}
-                    {item.accountName ? ` · ${item.accountName}` : ''}
-                  </Text>
-                  <Text style={styles.transactionSub}>
-                    {item.category ?? 'Other'}
-                  </Text>
-                </View>
-                <Text
-                  style={[
-                    styles.transactionAmount,
-                    item.type === 'expense' && styles.expenseText,
-                  ]}
-                >
-                  {item.type === 'income' ? '+' : '-'}
-                  {formatCurrency(item.amount)}
-                </Text>
-              </Pressable>
+                onEdit={entry => {
+                  setEditingTransaction(entry);
+                  setQuickAddOpen(true);
+                }}
+                onDelete={handleDeleteTransaction}
+                onLongPress={entry => setActionModalTransaction(entry)}
+              />
             )}
           />
 
@@ -873,6 +941,30 @@ function AppContent() {
             onSubmit={handleAddAccount}
             onDelete={handleDeleteAccount}
             initialValue={editingAccount}
+          />
+
+          <TransactionActionModal
+            visible={actionModalTransaction !== null}
+            transaction={actionModalTransaction}
+            currencySymbol={currencySymbol}
+            formatCurrency={formatCurrency}
+            onClose={() => setActionModalTransaction(null)}
+            onEdit={item => {
+              setActionModalTransaction(null);
+              setEditingTransaction(item);
+              setQuickAddOpen(true);
+            }}
+            onDuplicate={handleDuplicateTransaction}
+            onDelete={handleDeleteTransaction}
+          />
+
+          <UndoSnackbar
+            visible={undoSnackbar.visible}
+            message={undoSnackbar.message}
+            onUndo={handleUndoDelete}
+            onDismiss={() =>
+              setUndoSnackbar(prev => ({ ...prev, visible: false }))
+            }
           />
         </>
       )}
@@ -1134,6 +1226,12 @@ const styles = StyleSheet.create({
     fontSize: 16,
     fontWeight: '700',
     color: '#FFFFFF',
+  },
+  sectionHint: {
+    fontSize: 11,
+    color: 'rgba(255, 255, 255, 0.65)',
+    marginTop: 2,
+    fontWeight: '500',
   },
   sectionTitleWithBadge: {
     flexDirection: 'row',
