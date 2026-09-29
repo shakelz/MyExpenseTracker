@@ -4,6 +4,7 @@
     <uses-permission android:name="android.permission.SYSTEM_ALERT_WINDOW" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_DATA_SYNC" />
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
 
     <application
       android:name=".MainApplication"
@@ -30,6 +31,20 @@
             <category android:name="android.intent.category.DEFAULT" />
             <category android:name="android.intent.category.BROWSABLE" />
             <data android:scheme="fiscus" />
+        </intent-filter>
+      </activity>
+
+      <activity
+        android:name=".bubble.BubbleActivity"
+        android:label="Fiscus Quick Add"
+        android:theme="@style/AppTheme"
+        android:resizeableActivity="true"
+        android:documentLaunchMode="always"
+        android:windowSoftInputMode="adjustResize"
+        android:exported="true">
+        <intent-filter>
+          <action android:name="android.intent.action.VIEW" />
+          <category android:name="android.intent.category.DEFAULT" />
         </intent-filter>
       </activity>
 

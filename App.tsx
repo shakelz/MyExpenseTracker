@@ -24,6 +24,9 @@ import {
 } from 'react-native-safe-area-context';
 import QuickTransactionSheet from './src/components/QuickTransactionSheet';
 import AccountSheet from './src/components/AccountSheet';
+import TransactionCard from './src/components/TransactionCard';
+import TransactionActionModal from './src/components/TransactionActionModal';
+import UndoSnackbar from './src/components/UndoSnackbar';
 import { Account, Debt, DebtTransaction, DebtType, QuickTransaction } from './src/data/models';
 import AnalysisScreen from './src/screens/AnalysisScreen';
 import LoansScreen from './src/screens/LoansScreen';
@@ -98,6 +101,18 @@ function AppContent() {
     QuickTransaction | null
   >(null);
   const [editingAccount, setEditingAccount] = useState<Account | null>(null);
+  const [actionModalTransaction, setActionModalTransaction] =
+    useState<QuickTransaction | null>(null);
+  const [undoSnackbar, setUndoSnackbar] = useState<{
+    visible: boolean;
+    message: string;
+    deletedItem: QuickTransaction | null;
+  }>({
+    visible: false,
+    message: '',
+    deletedItem: null,
+  });
+  const [showAllRecent, setShowAllRecent] = useState(false);
   const [hasOverlayPermission, setHasOverlayPermission] = useState(false);
   const [bubbleEnabled, setBubbleEnabled] = useState(false);
   const [isNotificationAccessGranted, setNotificationAccessGranted] =
@@ -148,6 +163,10 @@ function AppContent() {
       ),
     [currentMonthIndex, transactions],
   );
+
+  const displayedTransactions = useMemo(() => {
+    return showAllRecent ? transactions : currentMonthTransactions;
+  }, [showAllRecent, transactions, currentMonthTransactions]);
 
   useEffect(() => {
     let isMounted = true;
@@ -374,35 +393,32 @@ function AppContent() {
   };
 
   const mergePendingTransactions = async (items: QuickTransaction[]) => {
-    setTransactions(current => [...items, ...current]);
-    setAccounts(current => {
-      let updated = [...current];
-      items.forEach(item => {
-        const accountName = item.accountName?.trim();
-        const accountType = item.accountType;
-        if (!accountName || !accountType) {
-          return;
-        }
-        let account = updated.find(
-          candidate =>
-            candidate.name.toLowerCase() === accountName.toLowerCase() &&
-            candidate.type === accountType,
-        );
-        if (!account) {
-          account = {
-            id: `acc-${Date.now()}-${Math.random()}`,
-            name: accountName,
-            type: accountType,
-            balance: 0,
-          };
-          updated = [account, ...updated];
-        }
-        const delta = item.type === 'income' ? item.amount : -item.amount;
-        account.balance += delta;
-      });
-      return updated;
-    });
+    if (!items || items.length === 0) return;
+
+    // 1. Deduplicate items within the incoming batch itself (window: 45s, matching note/account)
+    const dedupedItems: QuickTransaction[] = [];
     for (const item of items) {
+      const itemTime = new Date(item.createdAt || Date.now()).getTime();
+      const isDuplicateInBatch = dedupedItems.some(existing => {
+        const existingTime = new Date(existing.createdAt || Date.now()).getTime();
+        const sameAmount = Math.abs(Number(existing.amount) - Number(item.amount)) < 0.01;
+        const sameType = existing.type === item.type;
+        const timeDiff = Math.abs(existingTime - itemTime);
+        const sameNote = (existing.note || '').trim().toLowerCase() === (item.note || '').trim().toLowerCase();
+        const sameAccount = (existing.accountName || '').trim().toLowerCase() === (item.accountName || '').trim().toLowerCase();
+        return sameAmount && sameType && timeDiff < 45_000 && (sameNote || sameAccount);
+      });
+
+      if (!isDuplicateInBatch) {
+        dedupedItems.push(item);
+      } else {
+        console.log('[App] Duplicate transaction suppressed in incoming batch:', item);
+      }
+    }
+
+    // 2. Persist to SQLite with database-level deduplication
+    let hasNewTransactions = false;
+    for (const item of dedupedItems) {
       try {
         const result = await createLocalTransaction({
           type: item.type,
@@ -413,31 +429,28 @@ function AppContent() {
           accountType: item.accountType,
           createdAt: item.createdAt,
           category: item.category,
+          deduplicate: true,
         });
-        setTransactions(current =>
-          current.map(entry =>
-            entry.id === item.id ? result.transaction : entry,
-          ),
-        );
-        if (result.account) {
-          setAccounts(current =>
-            current.map(entry =>
-              entry.id === result.account!.id ? result.account! : entry,
-            ),
-          );
+
+        if (!result.isDuplicate) {
+          hasNewTransactions = true;
         }
-      } catch {
-        // ignore local sync errors
+      } catch (err) {
+        console.warn('[App] Error saving pending transaction:', err);
       }
     }
-    try {
-      const [freshAccounts, freshTxs] = await Promise.all([
-        fetchLocalAccounts(),
-        fetchLocalTransactions(),
-      ]);
-      setAccounts(freshAccounts);
-      setTransactions(freshTxs);
-    } catch {}
+
+    // 3. Refresh accounts and transactions authoritative from SQLite DB
+    if (hasNewTransactions || dedupedItems.length > 0) {
+      try {
+        const [freshAccounts, freshTxs] = await Promise.all([
+          fetchLocalAccounts(),
+          fetchLocalTransactions(),
+        ]);
+        setAccounts(freshAccounts);
+        setTransactions(freshTxs);
+      } catch {}
+    }
   };
 
   const findAccountIdByDetails = (
@@ -644,6 +657,72 @@ function AppContent() {
     }
     setEditingTransaction(null);
     setQuickAddOpen(false);
+    setActionModalTransaction(null);
+
+    const desc = entry.note || entry.category || (entry.type === 'income' ? 'Income' : 'Expense');
+    setUndoSnackbar({
+      visible: true,
+      message: `🗑️ Deleted ${desc} (${currencySymbol}${entry.amount.toFixed(2)})`,
+      deletedItem: entry,
+    });
+  };
+
+  const handleUndoDelete = async () => {
+    if (!undoSnackbar.deletedItem) return;
+    const entry = undoSnackbar.deletedItem;
+    setUndoSnackbar({ visible: false, message: '', deletedItem: null });
+
+    try {
+      const result = await createLocalTransaction({
+        type: entry.type,
+        amount: entry.amount,
+        note: entry.note || '',
+        accountId: entry.accountId,
+        accountName: entry.accountName,
+        accountType: entry.accountType,
+        createdAt: entry.createdAt,
+        category: entry.category,
+      });
+      setTransactions(current => [result.transaction, ...current]);
+      if (result.account) {
+        setAccounts(current =>
+          current.map(item =>
+            item.id === result.account!.id ? result.account! : item,
+          ),
+        );
+      }
+    } catch (err) {
+      console.warn('Failed to restore deleted transaction:', err);
+    }
+  };
+
+  const handleDuplicateTransaction = async (item: QuickTransaction) => {
+    try {
+      const result = await createLocalTransaction({
+        type: item.type,
+        amount: item.amount,
+        note: item.note ? `${item.note} (Copy)` : '',
+        accountId: item.accountId,
+        accountName: item.accountName,
+        accountType: item.accountType,
+        createdAt: new Date().toISOString(),
+        category: item.category,
+      });
+      setTransactions(current => [result.transaction, ...current]);
+      if (result.account) {
+        setAccounts(current =>
+          current.map(a => (a.id === result.account!.id ? result.account! : a)),
+        );
+      }
+      setActionModalTransaction(null);
+      setUndoSnackbar({
+        visible: true,
+        message: `📋 Duplicated "${item.note || item.category || 'Transaction'}"`,
+        deletedItem: null,
+      });
+    } catch (err) {
+      console.warn('Failed to duplicate transaction:', err);
+    }
   };
 
   return (
@@ -682,7 +761,7 @@ function AppContent() {
       ) : (
         <>
           <FlatList
-            data={currentMonthTransactions}
+            data={displayedTransactions}
             keyExtractor={item => item.id}
             contentContainerStyle={styles.scrollContent}
             showsVerticalScrollIndicator={false}
@@ -804,58 +883,41 @@ function AppContent() {
                 />
 
                 <View style={styles.sectionHeader}>
-                  <Text style={styles.sectionTitle}>Recent Transactions</Text>
-                  <Pressable>
-                    <Text style={styles.seeAllButton}>See All</Text>
+                  <View>
+                    <Text style={styles.sectionTitle}>Recent Transactions</Text>
+                    <Text style={styles.sectionHint}>
+                      Swipe ↔️ or hold for smart actions
+                    </Text>
+                  </View>
+                  <Pressable onPress={() => setShowAllRecent(prev => !prev)}>
+                    <Text style={styles.seeAllButton}>
+                      {showAllRecent ? 'Show Less' : 'See All'}
+                    </Text>
                   </Pressable>
                 </View>
               </View>
             }
             ListEmptyComponent={
               <Text style={styles.emptyText}>
-                No transactions this month.
+                No transactions {showAllRecent ? 'recorded' : 'this month'}.
               </Text>
             }
             renderItem={({ item }) => (
-              <Pressable
-                style={styles.transactionCard}
-                onPress={() => {
-                  setEditingTransaction(item);
+              <TransactionCard
+                item={item}
+                currencySymbol={currencySymbol}
+                formatCurrency={formatCurrency}
+                onPress={entry => {
+                  setEditingTransaction(entry);
                   setQuickAddOpen(true);
                 }}
-              >
-                <View style={styles.transactionIcon}>
-                  <Text style={styles.transactionIconText}>
-                    {item.type === 'income' ? '💳' : '🛒'}
-                  </Text>
-                </View>
-                <View style={styles.transactionInfo}>
-                  <Text style={styles.transactionTitle}>
-                    {item.note ||
-                      (item.type === 'income' ? 'Income' : 'Expense')}
-                  </Text>
-                  <Text style={styles.transactionMeta}>
-                    {new Date(item.createdAt).toLocaleDateString('en-GB', {
-                      day: '2-digit',
-                      month: 'short',
-                      year: 'numeric',
-                    })}
-                    {item.accountName ? ` · ${item.accountName}` : ''}
-                  </Text>
-                  <Text style={styles.transactionSub}>
-                    {item.category ?? 'Other'}
-                  </Text>
-                </View>
-                <Text
-                  style={[
-                    styles.transactionAmount,
-                    item.type === 'expense' && styles.expenseText,
-                  ]}
-                >
-                  {item.type === 'income' ? '+' : '-'}
-                  {formatCurrency(item.amount)}
-                </Text>
-              </Pressable>
+                onEdit={entry => {
+                  setEditingTransaction(entry);
+                  setQuickAddOpen(true);
+                }}
+                onDelete={handleDeleteTransaction}
+                onLongPress={entry => setActionModalTransaction(entry)}
+              />
             )}
           />
 
@@ -881,6 +943,30 @@ function AppContent() {
             onSubmit={handleAddAccount}
             onDelete={handleDeleteAccount}
             initialValue={editingAccount}
+          />
+
+          <TransactionActionModal
+            visible={actionModalTransaction !== null}
+            transaction={actionModalTransaction}
+            currencySymbol={currencySymbol}
+            formatCurrency={formatCurrency}
+            onClose={() => setActionModalTransaction(null)}
+            onEdit={item => {
+              setActionModalTransaction(null);
+              setEditingTransaction(item);
+              setQuickAddOpen(true);
+            }}
+            onDuplicate={handleDuplicateTransaction}
+            onDelete={handleDeleteTransaction}
+          />
+
+          <UndoSnackbar
+            visible={undoSnackbar.visible}
+            message={undoSnackbar.message}
+            onUndo={handleUndoDelete}
+            onDismiss={() =>
+              setUndoSnackbar(prev => ({ ...prev, visible: false }))
+            }
           />
         </>
       )}
@@ -1143,6 +1229,12 @@ const styles = StyleSheet.create({
     fontWeight: '700',
     color: '#FFFFFF',
   },
+  sectionHint: {
+    fontSize: 11,
+    color: 'rgba(255, 255, 255, 0.65)',
+    marginTop: 2,
+    fontWeight: '500',
+  },
   sectionTitleWithBadge: {
     flexDirection: 'row',
     alignItems: 'center',
@@ -1320,7 +1412,7 @@ const styles = StyleSheet.create({
   },
   list: {
     paddingHorizontal: 20,
-    paddingBottom: 100,
+    paddingBottom: 120,
   },
   transactionCard: {
     backgroundColor: '#FFFFFF',

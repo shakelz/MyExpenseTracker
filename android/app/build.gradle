@@ -88,8 +88,13 @@ android {
         applicationId "com.fiscus"
         minSdkVersion rootProject.ext.minSdkVersion
         targetSdkVersion rootProject.ext.targetSdkVersion
-        versionCode 4
-        versionName "1.1"
+        versionCode 6
+        versionName "1.2"
+        externalNativeBuild {
+            cmake {
+                arguments "-DANDROID_STL=c++_shared"
+            }
+        }
     }
     signingConfigs {
         debug {
@@ -112,7 +117,7 @@ android {
             signingConfig signingConfigs.debug
         }
         release {
-            signingConfig (keystorePropertiesFile.exists() ? signingConfigs.release : signingConfigs.debug)
+            signingConfig signingConfigs.release
             minifyEnabled enableProguardInReleaseBuilds
             proguardFiles getDefaultProguardFile("proguard-android.txt"), "proguard-rules.pro"
         }
@@ -122,6 +127,9 @@ android {
 dependencies {
     // The version of react-native is set by the React Native Gradle Plugin
     implementation("com.facebook.react:react-android")
+    implementation("androidx.core:core-ktx:1.15.0")
+    implementation("androidx.appcompat:appcompat:1.7.0")
+    implementation("com.facebook.rebound:rebound:0.3.8")
 
     if (hermesEnabled.toBoolean()) {
         implementation("com.facebook.react:hermes-android")

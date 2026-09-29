@@ -1,20 +1,27 @@
 package com.fiscus.bubble
 
+import android.animation.Animator
+import android.animation.AnimatorListenerAdapter
+import android.animation.ValueAnimator
 import android.app.Notification
 import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.app.Service
 import android.content.Context
 import android.content.Intent
-import android.net.Uri
+import android.graphics.Color
 import android.graphics.PixelFormat
+import android.graphics.Typeface
 import android.graphics.drawable.GradientDrawable
-import android.animation.ValueAnimator
+import android.net.Uri
 import android.os.Build
 import android.os.IBinder
+import android.os.VibrationEffect
+import android.os.Vibrator
 import android.util.TypedValue
 import android.view.Gravity
 import android.view.MotionEvent
+import android.view.VelocityTracker
 import android.view.View
 import android.view.WindowManager
 import android.view.animation.OvershootInterpolator
@@ -22,19 +29,41 @@ import android.view.inputmethod.EditorInfo
 import android.widget.ArrayAdapter
 import android.widget.EditText
 import android.widget.FrameLayout
+import android.widget.HorizontalScrollView
 import android.widget.ImageView
 import android.widget.LinearLayout
 import android.widget.Spinner
 import android.widget.TextView
 import android.widget.Toast
 import androidx.core.app.NotificationCompat
+import com.facebook.rebound.SimpleSpringListener
+import com.facebook.rebound.Spring
+import com.facebook.rebound.SpringConfig
+import com.facebook.rebound.SpringSystem
 import com.fiscus.R
 import org.json.JSONArray
 import org.json.JSONObject
+import java.text.SimpleDateFormat
+import java.util.Date
+import java.util.Locale
+import java.util.TimeZone
+import kotlin.math.abs
+import kotlin.math.sqrt
 
+/**
+ * Premium Facebook Messenger-style Chat Heads built using Facebook's Rebound Spring Physics.
+ *
+ * Features:
+ * - High-fidelity floating chat head with dual-layer glow, depth elevation, and Quick-Add '+' badge
+ * - Facebook Rebound Spring physics for tactile touch-down squash, edge-snapping oscillation & wall impact
+ * - Dynamic dragging tilt angle based on velocity (Messenger wobble effect)
+ * - Magnetic Close Target ('✕') with suction force, red danger state, and haptic feedback
+ * - Revolut/Messenger styled Quick Transaction floating card with category chips & account selector
+ */
 class SystemBubbleService : Service() {
   private var windowManager: WindowManager? = null
   private var bubbleView: View? = null
+  private var bubbleIcon: ImageView? = null
   private var formView: View? = null
   private var formRoot: FrameLayout? = null
   private var formCard: FrameLayout? = null
@@ -45,12 +74,90 @@ class SystemBubbleService : Service() {
   private var lastBubbleX: Int = 0
   private var lastBubbleY: Int = 0
   private var bubbleSizePx: Int = 0
+
+  // Close target
   private var removeTargetView: View? = null
   private var isOverRemoveTarget: Boolean = false
+
+  // Facebook Rebound Physics System
+  private val springSystem = SpringSystem.create()
+  private val snapSpringConfig = SpringConfig.fromOrigamiTensionAndFriction(44.0, 6.8)
+  private val scaleSpringConfig = SpringConfig.fromOrigamiTensionAndFriction(140.0, 8.5)
+  private val targetSpringConfig = SpringConfig.fromOrigamiTensionAndFriction(90.0, 8.0)
+
+  private var springX: Spring? = null
+  private var springY: Spring? = null
+  private var scaleSpring: Spring? = null
+  private var targetScaleSpring: Spring? = null
 
   private data class AccountOption(val name: String, val type: String, val balance: Double)
 
   override fun onBind(intent: Intent?): IBinder? = null
+
+  override fun onCreate() {
+    super.onCreate()
+    initReboundSprings()
+  }
+
+  private fun initReboundSprings() {
+    // Spring for X position
+    springX = springSystem.createSpring().apply {
+      springConfig = snapSpringConfig
+      addListener(object : SimpleSpringListener() {
+        override fun onSpringUpdate(spring: Spring) {
+          val params = layoutParams ?: return
+          val view = bubbleView ?: return
+          params.x = spring.currentValue.toInt()
+          lastBubbleX = params.x
+          try {
+            windowManager?.updateViewLayout(view, params)
+          } catch (_: Exception) {}
+        }
+      })
+    }
+
+    // Spring for Y position
+    springY = springSystem.createSpring().apply {
+      springConfig = snapSpringConfig
+      addListener(object : SimpleSpringListener() {
+        override fun onSpringUpdate(spring: Spring) {
+          val params = layoutParams ?: return
+          val view = bubbleView ?: return
+          params.y = spring.currentValue.toInt()
+          lastBubbleY = params.y
+          try {
+            windowManager?.updateViewLayout(view, params)
+          } catch (_: Exception) {}
+        }
+      })
+    }
+
+    // Spring for Chat Head Touch Scale
+    scaleSpring = springSystem.createSpring().apply {
+      springConfig = scaleSpringConfig
+      addListener(object : SimpleSpringListener() {
+        override fun onSpringUpdate(spring: Spring) {
+          val scale = spring.currentValue.toFloat()
+          bubbleView?.scaleX = scale
+          bubbleView?.scaleY = scale
+        }
+      })
+    }
+
+    // Spring for Close Target Scale
+    targetScaleSpring = springSystem.createSpring().apply {
+      springConfig = targetSpringConfig
+      addListener(object : SimpleSpringListener() {
+        override fun onSpringUpdate(spring: Spring) {
+          val scale = spring.currentValue.toFloat()
+          val target = removeTargetView as? FrameLayout ?: return
+          val circle = target.getChildAt(0) ?: return
+          circle.scaleX = scale
+          circle.scaleY = scale
+        }
+      })
+    }
+  }
 
   override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
     when (intent?.action) {
@@ -67,10 +174,12 @@ class SystemBubbleService : Service() {
       ACTION_HIDE -> {
         hideBubble()
         hideForm()
+        hideRemoveTarget()
       }
       ACTION_STOP -> {
         hideBubble()
         hideForm()
+        hideRemoveTarget()
         stopForeground(STOP_FOREGROUND_REMOVE)
         stopSelf()
       }
@@ -80,34 +189,102 @@ class SystemBubbleService : Service() {
 
   override fun onDestroy() {
     hideBubble()
+    hideForm()
+    hideRemoveTarget()
+    springX?.removeAllListeners()
+    springY?.removeAllListeners()
+    scaleSpring?.removeAllListeners()
+    targetScaleSpring?.removeAllListeners()
     super.onDestroy()
   }
 
-  private fun showBubble(x: Int, y: Int) {
+  private fun showBubble(preferredX: Int = 0, preferredY: Int = 0) {
     if (bubbleView != null) return
     hideForm()
 
     val wm = getSystemService(Context.WINDOW_SERVICE) as WindowManager
     windowManager = wm
 
-    val sizePx = dpToPx(56f)
+    val sizePx = dpToPx(64f)
     bubbleSizePx = sizePx
-    val container = FrameLayout(this)
-    val bubble = ImageView(this)
 
-    val bg = GradientDrawable().apply {
-      shape = GradientDrawable.OVAL
-      setColor(0xFFFFFFFF.toInt())
-      setStroke(dpToPx(1f), 0x22000000)
+    // Root container with padding for shadow & glow
+    val container = FrameLayout(this).apply {
+      clipChildren = false
+      clipToPadding = false
     }
-    bubble.background = bg
-    bubble.setImageResource(R.drawable.ic_fiscus_app)
-    bubble.scaleType = ImageView.ScaleType.CENTER_INSIDE
-    bubble.setPadding(dpToPx(10f), dpToPx(10f), dpToPx(10f), dpToPx(10f))
+
+    // Outer subtle glow ring
+    val glowRing = View(this).apply {
+      val bg = GradientDrawable().apply {
+        shape = GradientDrawable.OVAL
+        setColor(0x334F83FF.toInt())
+      }
+      background = bg
+    }
+    container.addView(
+      glowRing,
+      FrameLayout.LayoutParams(sizePx + dpToPx(6f), sizePx + dpToPx(6f)).apply {
+        gravity = Gravity.CENTER
+      }
+    )
+
+    // Inner circular chat head body
+    val bubble = ImageView(this).apply {
+      val bg = GradientDrawable().apply {
+        shape = GradientDrawable.OVAL
+        colors = intArrayOf(0xFF282E4E.toInt(), 0xFF141728.toInt())
+        gradientType = GradientDrawable.RADIAL_GRADIENT
+        gradientRadius = dpToPx(38f).toFloat()
+        setStroke(dpToPx(2.5f), 0xFF4F83FF.toInt())
+      }
+      background = bg
+      setImageResource(R.drawable.ic_fiscus_app)
+      scaleType = ImageView.ScaleType.CENTER_INSIDE
+      setPadding(dpToPx(13f), dpToPx(13f), dpToPx(13f), dpToPx(13f))
+      elevation = dpToPx(10f).toFloat()
+    }
+    bubbleIcon = bubble
 
     container.addView(
       bubble,
-      FrameLayout.LayoutParams(sizePx, sizePx)
+      FrameLayout.LayoutParams(sizePx, sizePx).apply {
+        gravity = Gravity.CENTER
+      }
+    )
+
+    // Facebook-style Quick Action badge '+' indicator at bottom right
+    val badgeSize = dpToPx(22f)
+    val actionBadge = FrameLayout(this).apply {
+      val badgeBg = GradientDrawable().apply {
+        shape = GradientDrawable.OVAL
+        colors = intArrayOf(0xFF10B981.toInt(), 0xFF059669.toInt())
+        orientation = GradientDrawable.Orientation.TOP_BOTTOM
+        setStroke(dpToPx(2f), 0xFF141728.toInt())
+      }
+      background = badgeBg
+      elevation = dpToPx(12f).toFloat()
+
+      val plusIcon = TextView(this@SystemBubbleService).apply {
+        text = "+"
+        textSize = 14f
+        setTypeface(typeface, Typeface.BOLD)
+        setTextColor(Color.WHITE)
+        gravity = Gravity.CENTER
+      }
+      addView(
+        plusIcon,
+        FrameLayout.LayoutParams(FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.MATCH_PARENT)
+      )
+    }
+
+    container.addView(
+      actionBadge,
+      FrameLayout.LayoutParams(badgeSize, badgeSize).apply {
+        gravity = Gravity.BOTTOM or Gravity.END
+        rightMargin = dpToPx(3f)
+        bottomMargin = dpToPx(3f)
+      }
     )
 
     val type = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
@@ -117,32 +294,50 @@ class SystemBubbleService : Service() {
       WindowManager.LayoutParams.TYPE_PHONE
     }
 
+    val metrics = resources.displayMetrics
+    val screenWidth = metrics.widthPixels
+    val screenHeight = metrics.heightPixels
+
+    val initialX = if (preferredX > 0) preferredX else (screenWidth - sizePx - dpToPx(8f))
+    val initialY = if (preferredY > 0) preferredY else (screenHeight / 3)
+
     layoutParams = WindowManager.LayoutParams(
-      sizePx,
-      sizePx,
+      sizePx + dpToPx(16f),
+      sizePx + dpToPx(16f),
       type,
       WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
         WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS,
       PixelFormat.TRANSLUCENT
     ).apply {
       gravity = Gravity.TOP or Gravity.START
-      this.x = x
-      this.y = y
+      x = initialX
+      y = initialY
     }
 
-    lastBubbleX = x
-    lastBubbleY = y
+    lastBubbleX = initialX
+    lastBubbleY = initialY
 
-    container.setOnTouchListener(BubbleTouchListener())
+    container.setOnTouchListener(FacebookBubbleTouchListener())
 
     wm.addView(container, layoutParams)
     bubbleView = container
+
+    scaleSpring?.currentValue = 0.0
+    scaleSpring?.endValue = 1.0
+
+    // Ensure it snaps to nearest edge smoothly using Rebound spring
+    springX?.currentValue = initialX.toDouble()
+    springY?.currentValue = initialY.toDouble()
+    snapBubbleToEdgeRebound(0f)
   }
 
   private fun hideBubble() {
     val view = bubbleView ?: return
-    windowManager?.removeView(view)
+    try {
+      windowManager?.removeView(view)
+    } catch (_: Exception) {}
     bubbleView = null
+    bubbleIcon = null
   }
 
   private fun handleBubbleClick() {
@@ -152,44 +347,44 @@ class SystemBubbleService : Service() {
       return
     }
 
-    bubble.animate()
-      .translationYBy(dpToPx(12f).toFloat())
-      .alpha(0f)
-      .setDuration(120)
-      .withEndAction {
-        hideBubble()
-        showForm()
-      }
-      .start()
+    vibrateDevice(20)
+    scaleSpring?.endValue = 1.15
+    bubble.postDelayed({
+      scaleSpring?.endValue = 1.0
+      hideBubble()
+      showForm()
+    }, 120)
   }
 
+  // --- Revolut/Messenger-Styled Quick Add Modal ---
   private fun showForm() {
     if (formView != null) return
     val wm = windowManager ?: return
 
-    val root = FrameLayout(this)
-    root.layoutParams = FrameLayout.LayoutParams(
-      FrameLayout.LayoutParams.MATCH_PARENT,
-      FrameLayout.LayoutParams.MATCH_PARENT
-    )
-    root.setBackgroundColor(0x00000000)
-
-    val bubbleSize = if (bubbleSizePx > 0) bubbleSizePx else dpToPx(56f)
+    val root = FrameLayout(this).apply {
+      layoutParams = FrameLayout.LayoutParams(
+        FrameLayout.LayoutParams.MATCH_PARENT,
+        FrameLayout.LayoutParams.MATCH_PARENT
+      )
+      setBackgroundColor(0x88090B14.toInt())
+    }
 
     val cardBackground = GradientDrawable().apply {
-      cornerRadius = bubbleSize / 2f
-      setColor(0xCC1F243A.toInt())
-      setStroke(dpToPx(1f), 0x55FFFFFF)
+      cornerRadius = dpToPx(28f).toFloat()
+      colors = intArrayOf(0xF8171B2D.toInt(), 0xF8101322.toInt())
+      gradientType = GradientDrawable.LINEAR_GRADIENT
+      orientation = GradientDrawable.Orientation.TOP_BOTTOM
+      setStroke(dpToPx(1.5f), 0x554F83FF.toInt())
     }
 
     val cardContainer = FrameLayout(this).apply {
       background = cardBackground
-      elevation = dpToPx(10f).toFloat()
+      elevation = dpToPx(20f).toFloat()
+      setPadding(dpToPx(20f), dpToPx(16f), dpToPx(20f), dpToPx(20f))
     }
 
     val cardContent = LinearLayout(this).apply {
       orientation = LinearLayout.VERTICAL
-      setPadding(dpToPx(16f), dpToPx(16f), dpToPx(16f), dpToPx(16f))
       alpha = 0f
     }
     cardContent.layoutParams = FrameLayout.LayoutParams(
@@ -197,145 +392,294 @@ class SystemBubbleService : Service() {
       FrameLayout.LayoutParams.WRAP_CONTENT
     )
 
+    // Top Pill Drag Handle
     val dragHandle = View(this).apply {
       background = GradientDrawable().apply {
         cornerRadius = dpToPx(3f).toFloat()
-        setColor(0x66FFFFFF)
+        setColor(0x44FFFFFF)
       }
     }
-    val dragParams = LinearLayout.LayoutParams(dpToPx(44f), dpToPx(6f)).apply {
+    val dragParams = LinearLayout.LayoutParams(dpToPx(42f), dpToPx(4.5f)).apply {
       gravity = Gravity.CENTER_HORIZONTAL
-      bottomMargin = dpToPx(10f)
+      bottomMargin = dpToPx(12f)
     }
     cardContent.addView(dragHandle, dragParams)
 
-    fun createPill(textValue: String, bgColor: Int, textColor: Int): TextView {
-      return TextView(this).apply {
-        text = textValue
-        textSize = 12f
-        setTextColor(textColor)
-        setPadding(dpToPx(12f), dpToPx(8f), dpToPx(12f), dpToPx(8f))
-        background = GradientDrawable().apply {
-          cornerRadius = dpToPx(12f).toFloat()
-          setColor(bgColor)
-        }
-      }
+    // Header: App Mini Icon + Title & Subtitle + Close Button
+    val headerRow = LinearLayout(this).apply {
+      orientation = LinearLayout.HORIZONTAL
+      gravity = Gravity.CENTER_VERTICAL
     }
 
+    val headerIcon = ImageView(this).apply {
+      setImageResource(R.drawable.ic_fiscus_app)
+      background = GradientDrawable().apply {
+        shape = GradientDrawable.OVAL
+        setColor(0xFF262C47.toInt())
+        setStroke(dpToPx(1f), 0xFF4F83FF.toInt())
+      }
+      setPadding(dpToPx(5f), dpToPx(5f), dpToPx(5f), dpToPx(5f))
+    }
+    headerRow.addView(headerIcon, LinearLayout.LayoutParams(dpToPx(32f), dpToPx(32f)))
+
+    val titleColumn = LinearLayout(this).apply {
+      orientation = LinearLayout.VERTICAL
+      setPadding(dpToPx(10f), 0, 0, 0)
+    }
+    val headerTitle = TextView(this).apply {
+      text = "Quick Transaction"
+      textSize = 17f
+      setTypeface(typeface, Typeface.BOLD)
+      setTextColor(Color.WHITE)
+    }
+    val headerSub = TextView(this).apply {
+      text = "Instantly log without opening app"
+      textSize = 11f
+      setTextColor(0xFF7E85A6.toInt())
+    }
+    titleColumn.addView(headerTitle)
+    titleColumn.addView(headerSub)
+    headerRow.addView(titleColumn, LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f))
+
+    val headerClose = FrameLayout(this).apply {
+      val closeBg = GradientDrawable().apply {
+        shape = GradientDrawable.OVAL
+        setColor(0x33FFFFFF)
+      }
+      background = closeBg
+      val xText = TextView(this@SystemBubbleService).apply {
+        text = "✕"
+        textSize = 14f
+        setTypeface(typeface, Typeface.BOLD)
+        setTextColor(0xFFB0B7D6.toInt())
+        gravity = Gravity.CENTER
+      }
+      addView(xText, FrameLayout.LayoutParams(FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.MATCH_PARENT))
+      setOnClickListener {
+        vibrateDevice(15)
+        closeFormAndReturnBubble()
+      }
+    }
+    headerRow.addView(headerClose, LinearLayout.LayoutParams(dpToPx(30f), dpToPx(30f)))
+
+    cardContent.addView(headerRow)
+    cardContent.addView(spaceView(14f))
+
+    // Segmented Expense / Income Switcher
     val toggleContainer = LinearLayout(this).apply {
       orientation = LinearLayout.HORIZONTAL
       setPadding(dpToPx(4f), dpToPx(4f), dpToPx(4f), dpToPx(4f))
       background = GradientDrawable().apply {
-        cornerRadius = dpToPx(14f).toFloat()
-        setColor(0xFF3A3D5C.toInt())
+        cornerRadius = dpToPx(16f).toFloat()
+        setColor(0xFF22263D.toInt())
       }
     }
 
-    val incomeToggle = createPill("Income", 0xFF5AC88C.toInt(), 0xFF0F1C12.toInt())
-    val expenseToggle = createPill("Expense", 0xFF4A4E72.toInt(), 0xFFFFFFFF.toInt())
-
-    val currencySymbol = getCurrencySymbol()
-    val amountLabel = TextView(this).apply {
-      text = "Total Expense (${currencySymbol})"
-      textSize = 12f
-      setTextColor(0xFFB9BED6.toInt())
+    fun createSegmentPill(textValue: String, activeBg: Int): TextView {
+      return TextView(this).apply {
+        text = textValue
+        textSize = 13.5f
+        setTypeface(typeface, Typeface.BOLD)
+        gravity = Gravity.CENTER
+        setPadding(dpToPx(16f), dpToPx(10f), dpToPx(16f), dpToPx(10f))
+      }
     }
+
+    val expenseToggle = createSegmentPill("↓ Expense", 0xFFEF4444.toInt())
+    val incomeToggle = createSegmentPill("↑ Income", 0xFF10B981.toInt())
 
     var selectedType = "expense"
+    val currencySymbol = getCurrencySymbol()
+
     val updateTypeUi = {
-      val incomeSelected = selectedType == "income"
-      incomeToggle.background = GradientDrawable().apply {
-        cornerRadius = dpToPx(12f).toFloat()
-        setColor(if (incomeSelected) 0xFF5AC88C.toInt() else 0xFF4A4E72.toInt())
-      }
-      incomeToggle.setTextColor(if (incomeSelected) 0xFF0F1C12.toInt() else 0xFFFFFFFF.toInt())
+      val isExpense = selectedType == "expense"
       expenseToggle.background = GradientDrawable().apply {
         cornerRadius = dpToPx(12f).toFloat()
-        setColor(if (incomeSelected) 0xFF4A4E72.toInt() else 0xFFE46666.toInt())
+        setColor(if (isExpense) 0xFFEF4444.toInt() else Color.TRANSPARENT)
       }
-      expenseToggle.setTextColor(if (incomeSelected) 0xFFFFFFFF.toInt() else 0xFFFFFFFF.toInt())
-      amountLabel.text = if (incomeSelected) {
-        "Total Income (${currencySymbol})"
-      } else {
-        "Total Expense (${currencySymbol})"
+      expenseToggle.setTextColor(if (isExpense) Color.WHITE else 0xFF7E85A6.toInt())
+
+      incomeToggle.background = GradientDrawable().apply {
+        cornerRadius = dpToPx(12f).toFloat()
+        setColor(if (!isExpense) 0xFF10B981.toInt() else Color.TRANSPARENT)
       }
+      incomeToggle.setTextColor(if (!isExpense) Color.WHITE else 0xFF7E85A6.toInt())
     }
 
-    incomeToggle.setOnClickListener {
-      selectedType = "income"
-      updateTypeUi()
-    }
     expenseToggle.setOnClickListener {
+      vibrateDevice(12)
       selectedType = "expense"
       updateTypeUi()
     }
+    incomeToggle.setOnClickListener {
+      vibrateDevice(12)
+      selectedType = "income"
+      updateTypeUi()
+    }
 
-    toggleContainer.addView(
-      incomeToggle,
-      LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f)
-    )
-    toggleContainer.addView(
-      expenseToggle,
-      LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f)
-    )
+    toggleContainer.addView(expenseToggle, LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f))
+    toggleContainer.addView(incomeToggle, LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f))
+    updateTypeUi()
+    cardContent.addView(toggleContainer)
+    cardContent.addView(spaceView(12f))
 
-    fun createInputBackground(): GradientDrawable {
-      return GradientDrawable().apply {
-        cornerRadius = dpToPx(12f).toFloat()
-        setColor(0xFFFFFFFF.toInt())
+    // Hero Amount Input Card
+    val amountCard = LinearLayout(this).apply {
+      orientation = LinearLayout.HORIZONTAL
+      gravity = Gravity.CENTER_VERTICAL
+      setPadding(dpToPx(16f), dpToPx(6f), dpToPx(16f), dpToPx(6f))
+      background = GradientDrawable().apply {
+        cornerRadius = dpToPx(16f).toFloat()
+        setColor(0xFF20243A.toInt())
+        setStroke(dpToPx(1.5f), 0x334F83FF.toInt())
       }
     }
 
+    val currLabel = TextView(this).apply {
+      text = currencySymbol
+      textSize = 24f
+      setTypeface(typeface, Typeface.BOLD)
+      setTextColor(0xFF4F83FF.toInt())
+    }
+    amountCard.addView(currLabel)
+
     val amountInput = EditText(this).apply {
-      hint = "${currencySymbol} 0.00"
+      hint = "0.00"
+      textSize = 26f
+      setTypeface(typeface, Typeface.BOLD)
       inputType = EditorInfo.TYPE_CLASS_NUMBER or EditorInfo.TYPE_NUMBER_FLAG_DECIMAL
-      setPadding(dpToPx(12f), dpToPx(10f), dpToPx(12f), dpToPx(10f))
-      setTextColor(0xFF1B1F33.toInt())
-      setHintTextColor(0xFF9BA3C7.toInt())
-      background = createInputBackground()
-      minHeight = dpToPx(44f)
+      setPadding(dpToPx(10f), dpToPx(10f), dpToPx(10f), dpToPx(10f))
+      setTextColor(Color.WHITE)
+      setHintTextColor(0xFF555C7E.toInt())
+      background = null
+      minHeight = dpToPx(52f)
     }
+    amountCard.addView(amountInput, LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f))
 
+    cardContent.addView(amountCard)
+    cardContent.addView(spaceView(10f))
+
+    // Note / Merchant Input
     val noteInput = EditText(this).apply {
-      hint = "What did you buy?"
+      hint = "Note (e.g. Groceries, Coffee, Fuel)"
+      textSize = 13.5f
       inputType = EditorInfo.TYPE_CLASS_TEXT or EditorInfo.TYPE_TEXT_FLAG_CAP_SENTENCES
-      setPadding(dpToPx(12f), dpToPx(10f), dpToPx(12f), dpToPx(10f))
-      setTextColor(0xFF1B1F33.toInt())
-      setHintTextColor(0xFF9BA3C7.toInt())
-      background = createInputBackground()
-      minHeight = dpToPx(44f)
+      setPadding(dpToPx(16f), dpToPx(12f), dpToPx(16f), dpToPx(12f))
+      setTextColor(Color.WHITE)
+      setHintTextColor(0xFF555C7E.toInt())
+      background = GradientDrawable().apply {
+        cornerRadius = dpToPx(14f).toFloat()
+        setColor(0xFF20243A.toInt())
+        setStroke(dpToPx(1f), 0x224F83FF.toInt())
+      }
+      minHeight = dpToPx(46f)
     }
+    cardContent.addView(noteInput)
+    cardContent.addView(spaceView(12f))
 
-    val categoryLabel = TextView(this).apply {
-      text = "Category"
-      textSize = 12f
-      setTextColor(0xFFB9BED6.toInt())
+    // Category Selector with Horizontal Chips
+    val categoryHeader = TextView(this).apply {
+      text = "SELECT CATEGORY"
+      textSize = 10.5f
+      setTypeface(typeface, Typeface.BOLD)
+      setTextColor(0xFF7E85A6.toInt())
+      letterSpacing = 0.08f
     }
-    val bankLabel = TextView(this).apply {
-      text = "Bank/Wallet"
-      textSize = 12f
-      setTextColor(0xFFB9BED6.toInt())
-    }
+    cardContent.addView(categoryHeader)
+    cardContent.addView(spaceView(6f))
+
     val prefs = getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
     val categoryOptions = loadCategories(prefs)
-    val accountOptions = loadAccounts(prefs)
+    var selectedCategory = categoryOptions.firstOrNull() ?: "Food"
 
-    val categorySpinner = Spinner(this).apply {
-      adapter = ArrayAdapter(
-        this@SystemBubbleService,
-        android.R.layout.simple_spinner_dropdown_item,
-        categoryOptions
-      )
-      background = createInputBackground()
-      setPadding(dpToPx(12f), dpToPx(10f), dpToPx(12f), dpToPx(10f))
-      minimumHeight = dpToPx(44f)
+    val categoryScroll = HorizontalScrollView(this).apply {
+      isHorizontalScrollBarEnabled = false
+    }
+    val categoryChipRow = LinearLayout(this).apply {
+      orientation = LinearLayout.HORIZONTAL
     }
 
+    val categoryChipViews = mutableListOf<TextView>()
+
+    fun getCategoryIcon(name: String): String {
+      return when (name.lowercase(Locale.ROOT)) {
+        "food", "groceries" -> "🍔"
+        "transport", "travel" -> "🚗"
+        "bills" -> "💡"
+        "shopping" -> "🛒"
+        "health" -> "🏥"
+        "salary" -> "💰"
+        "bonus" -> "🎁"
+        "refund" -> "↩️"
+        "interest" -> "📈"
+        "entertainment" -> "🍿"
+        else -> "📦"
+      }
+    }
+
+    fun updateCategoryChipsUi() {
+      categoryChipViews.forEach { chip ->
+        val catName = chip.tag as? String ?: return@forEach
+        val isSelected = catName == selectedCategory
+        chip.background = GradientDrawable().apply {
+          cornerRadius = dpToPx(12f).toFloat()
+          if (isSelected) {
+            setColor(0xFF4F83FF.toInt())
+            setStroke(dpToPx(1f), 0xFF85AAFF.toInt())
+          } else {
+            setColor(0xFF20243A.toInt())
+            setStroke(dpToPx(1f), 0x22FFFFFF)
+          }
+        }
+        chip.setTextColor(if (isSelected) Color.WHITE else 0xFF8E95B8.toInt())
+      }
+    }
+
+    categoryOptions.forEach { cat ->
+      val icon = getCategoryIcon(cat)
+      val chip = TextView(this).apply {
+        tag = cat
+        text = "$icon $cat"
+        textSize = 12f
+        setTypeface(typeface, Typeface.BOLD)
+        setPadding(dpToPx(12f), dpToPx(8f), dpToPx(12f), dpToPx(8f))
+        setOnClickListener {
+          vibrateDevice(10)
+          selectedCategory = cat
+          updateCategoryChipsUi()
+        }
+      }
+      categoryChipViews.add(chip)
+      val chipParams = LinearLayout.LayoutParams(
+        LinearLayout.LayoutParams.WRAP_CONTENT,
+        LinearLayout.LayoutParams.WRAP_CONTENT
+      ).apply {
+        rightMargin = dpToPx(8f)
+      }
+      categoryChipRow.addView(chip, chipParams)
+    }
+    updateCategoryChipsUi()
+    categoryScroll.addView(categoryChipRow)
+    cardContent.addView(categoryScroll)
+    cardContent.addView(spaceView(12f))
+
+    // Account / Wallet Selector
+    val accountHeader = TextView(this).apply {
+      text = "ACCOUNT / WALLET"
+      textSize = 10.5f
+      setTypeface(typeface, Typeface.BOLD)
+      setTextColor(0xFF7E85A6.toInt())
+      letterSpacing = 0.08f
+    }
+    cardContent.addView(accountHeader)
+    cardContent.addView(spaceView(6f))
+
+    val accountOptions = loadAccounts(prefs)
     val accountLabels = accountOptions.map { option ->
       if (option.name == ADD_ACCOUNT_OPTION) {
-        option.name
+        "+ $ADD_ACCOUNT_OPTION"
       } else {
-        "${option.name} · ${currencySymbol}${String.format("%.2f", option.balance)}"
+        "💳 ${option.name}  ($currencySymbol${String.format(Locale.US, "%.2f", option.balance)})"
       }
     }
 
@@ -345,55 +689,55 @@ class SystemBubbleService : Service() {
         android.R.layout.simple_spinner_dropdown_item,
         accountLabels
       )
-      background = createInputBackground()
-      setPadding(dpToPx(12f), dpToPx(10f), dpToPx(12f), dpToPx(10f))
-      minimumHeight = dpToPx(44f)
-    }
-
-    var selectedCategory = categoryOptions.firstOrNull() ?: "Other"
-    var selectedBank = accountOptions.firstOrNull()?.name ?: ""
-    var selectedAccountType = accountOptions.firstOrNull()?.type ?: "bank"
-    categorySpinner.setSelection(0)
-    accountSpinner.setSelection(0)
-
-
-    val saveButton = TextView(this).apply {
-      text = "Save Transaction"
-      textSize = 14f
-      setTextColor(0xFFFFFFFF.toInt())
-      setPadding(dpToPx(14f), dpToPx(12f), dpToPx(14f), dpToPx(12f))
       background = GradientDrawable().apply {
-        cornerRadius = dpToPx(12f).toFloat()
-        setColor(0xFF4B7BFF.toInt())
+        cornerRadius = dpToPx(14f).toFloat()
+        setColor(0xFF20243A.toInt())
+        setStroke(dpToPx(1f), 0x224F83FF.toInt())
       }
-      gravity = Gravity.CENTER
+      setPadding(dpToPx(14f), dpToPx(10f), dpToPx(14f), dpToPx(10f))
+      minimumHeight = dpToPx(46f)
     }
-    val cancelButton = TextView(this).apply {
-      text = "Cancel"
-      textSize = 12f
-      setTextColor(0xFFB9BED6.toInt())
+    accountSpinner.setSelection(0)
+    cardContent.addView(accountSpinner)
+    cardContent.addView(spaceView(16f))
+
+    // Primary "✓ Save Transaction" Button
+    val saveButton = TextView(this).apply {
+      text = "✓ Save to Fiscus"
+      textSize = 15f
+      setTypeface(typeface, Typeface.BOLD)
+      setTextColor(Color.WHITE)
       gravity = Gravity.CENTER
+      setPadding(dpToPx(16f), dpToPx(14f), dpToPx(16f), dpToPx(14f))
+      background = GradientDrawable().apply {
+        cornerRadius = dpToPx(16f).toFloat()
+        colors = intArrayOf(0xFF4F83FF.toInt(), 0xFF356AE6.toInt())
+        orientation = GradientDrawable.Orientation.TOP_BOTTOM
+      }
+      elevation = dpToPx(6f).toFloat()
     }
 
     saveButton.setOnClickListener {
       val amountText = amountInput.text?.toString()?.trim() ?: ""
       val amount = amountText.toDoubleOrNull()
       if (amount == null || amount <= 0) {
-        Toast.makeText(this, "Enter a valid amount", Toast.LENGTH_SHORT).show()
+        vibrateDevice(30)
+        Toast.makeText(this, "Please enter a valid amount", Toast.LENGTH_SHORT).show()
         return@setOnClickListener
       }
       val note = noteInput.text?.toString()?.trim() ?: ""
-      selectedCategory = categorySpinner.selectedItem?.toString()?.trim() ?: "Other"
       val accountIndex = accountSpinner.selectedItemPosition
       val selectedAccount = accountOptions.getOrNull(accountIndex)
-      selectedBank = selectedAccount?.name?.trim() ?: ""
-      selectedAccountType = selectedAccount?.type ?: "bank"
+      val selectedBank = selectedAccount?.name?.trim() ?: ""
+      val selectedAccountType = selectedAccount?.type ?: "bank"
+
       if (selectedBank == ADD_ACCOUNT_OPTION) {
         openAddAccount()
-        Toast.makeText(this, "Open the app to add an account", Toast.LENGTH_SHORT).show()
+        Toast.makeText(this, "Open app to add accounts", Toast.LENGTH_SHORT).show()
         closeFormAndReturnBubble()
         return@setOnClickListener
       }
+
       saveTransaction(
         selectedType,
         amount,
@@ -403,197 +747,36 @@ class SystemBubbleService : Service() {
         selectedCategory,
         System.currentTimeMillis(),
       )
-      Toast.makeText(this, "Saved", Toast.LENGTH_SHORT).show()
+      vibrateDevice(50)
+      Toast.makeText(this, "✓ Logged $currencySymbol$amountText ($selectedCategory)", Toast.LENGTH_SHORT).show()
       closeFormAndReturnBubble()
     }
 
-    cancelButton.setOnClickListener {
-      closeFormAndReturnBubble()
-    }
-
-    cardContent.addView(toggleContainer)
-    cardContent.addView(spaceView(10f))
-    cardContent.addView(amountLabel)
-    cardContent.addView(spaceView(6f))
-
-    amountInput.layoutParams = LinearLayout.LayoutParams(
-      LinearLayout.LayoutParams.MATCH_PARENT,
-      LinearLayout.LayoutParams.WRAP_CONTENT
-    )
-    cardContent.addView(amountInput)
-    cardContent.addView(spaceView(8f))
-    noteInput.layoutParams = LinearLayout.LayoutParams(
-      LinearLayout.LayoutParams.MATCH_PARENT,
-      LinearLayout.LayoutParams.WRAP_CONTENT
-    )
-    cardContent.addView(noteInput)
-    cardContent.addView(spaceView(10f))
-
-    val row = LinearLayout(this).apply {
-      orientation = LinearLayout.HORIZONTAL
-    }
-    val categoryColumn = LinearLayout(this).apply {
-      orientation = LinearLayout.VERTICAL
-    }
-    val bankColumn = LinearLayout(this).apply {
-      orientation = LinearLayout.VERTICAL
-    }
-    categoryColumn.addView(categoryLabel)
-    categoryColumn.addView(spaceView(6f))
-    categorySpinner.layoutParams = LinearLayout.LayoutParams(
-      LinearLayout.LayoutParams.MATCH_PARENT,
-      LinearLayout.LayoutParams.WRAP_CONTENT
-    )
-    categoryColumn.addView(categorySpinner)
-    bankColumn.addView(bankLabel)
-    bankColumn.addView(spaceView(6f))
-    accountSpinner.layoutParams = LinearLayout.LayoutParams(
-      LinearLayout.LayoutParams.MATCH_PARENT,
-      LinearLayout.LayoutParams.WRAP_CONTENT
-    )
-    bankColumn.addView(accountSpinner)
-    row.addView(
-      categoryColumn,
-      LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f)
-    )
-    row.addView(View(this).apply {
-      layoutParams = LinearLayout.LayoutParams(dpToPx(10f), LinearLayout.LayoutParams.MATCH_PARENT)
-    })
-    row.addView(
-      bankColumn,
-      LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f)
-    )
-
-    cardContent.addView(row)
-    cardContent.addView(spaceView(12f))
     cardContent.addView(saveButton)
-    cardContent.addView(spaceView(6f))
-    cardContent.addView(cancelButton)
 
-    updateTypeUi()
+    val metrics = resources.displayMetrics
+    val screenWidth = metrics.widthPixels
+    val cardMargin = dpToPx(18f)
+    val cardWidth = screenWidth - cardMargin * 2
 
-    var dragStartX = 0f
-    var dragStartY = 0f
-    var cardStartMarginX = 0
-    var cardStartMarginY = 0
-    var isDragging = false
-    val dragSlop = dpToPx(8f)
-
-    cardContainer.setOnTouchListener { _, event ->
-      when (event.action) {
-        MotionEvent.ACTION_DOWN -> {
-          dragStartX = event.rawX
-          dragStartY = event.rawY
-          val params = cardContainer.layoutParams as FrameLayout.LayoutParams
-          cardStartMarginX = params.leftMargin
-          cardStartMarginY = params.topMargin
-          isDragging = false
-          true
-        }
-        MotionEvent.ACTION_MOVE -> {
-          val dx = event.rawX - dragStartX
-          val dy = event.rawY - dragStartY
-          if (!isDragging && (Math.abs(dx) > dragSlop || Math.abs(dy) > dragSlop)) {
-            isDragging = true
-          }
-          if (isDragging) {
-            val params = cardContainer.layoutParams as FrameLayout.LayoutParams
-            val maxX = (root.width - cardContainer.width).coerceAtLeast(0)
-            val maxY = (root.height - cardContainer.height).coerceAtLeast(0)
-            params.leftMargin = (cardStartMarginX + dx.toInt()).coerceIn(0, maxX)
-            params.topMargin = (cardStartMarginY + dy.toInt()).coerceIn(0, maxY)
-            cardContainer.layoutParams = params
-          }
-          true
-        }
-        MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> {
-          isDragging = false
-          true
-        }
-        else -> false
-      }
-    }
-
-    dragHandle.setOnTouchListener { v, event ->
-      cardContainer.onTouchEvent(event)
+    val cardParams = FrameLayout.LayoutParams(
+      cardWidth,
+      FrameLayout.LayoutParams.WRAP_CONTENT
+    ).apply {
+      gravity = Gravity.CENTER
     }
 
     cardContainer.addView(cardContent)
-
-    val cardParams = FrameLayout.LayoutParams(
-      bubbleSize,
-      bubbleSize
-    ).apply {
-      gravity = Gravity.TOP or Gravity.START
-      leftMargin = lastBubbleX
-      topMargin = lastBubbleY
-    }
-
     root.addView(cardContainer, cardParams)
-    cardContainer.post {
-      val metrics = resources.displayMetrics
-      val targetWidth = dpToPx(320f)
-      val widthSpec = View.MeasureSpec.makeMeasureSpec(targetWidth, View.MeasureSpec.EXACTLY)
-      val heightSpec = View.MeasureSpec.makeMeasureSpec(0, View.MeasureSpec.UNSPECIFIED)
-      cardContent.measure(widthSpec, heightSpec)
-      val targetHeight = cardContent.measuredHeight
 
-      val startWidth = bubbleSize
-      val startHeight = bubbleSize
-      val startX = lastBubbleX
-      val startY = lastBubbleY
-      val targetX = ((metrics.widthPixels - targetWidth) / 2f).toInt()
-      val targetY = (metrics.heightPixels * 0.12f).toInt()
-      val startRadius = bubbleSize / 2f
-      val targetRadius = dpToPx(18f).toFloat()
-
-      val animator = ValueAnimator.ofFloat(0f, 1f)
-      animator.duration = 260
-      isAnimatingForm = true
-      animator.addUpdateListener { animation ->
-        val progress = animation.animatedValue as Float
-        val nextWidth = (startWidth + (targetWidth - startWidth) * progress).toInt()
-        val nextHeight = (startHeight + (targetHeight - startHeight) * progress).toInt()
-        val nextX = (startX + (targetX - startX) * progress).toInt()
-        val nextY = (startY + (targetY - startY) * progress).toInt()
-        val params = cardContainer.layoutParams as FrameLayout.LayoutParams
-        params.width = nextWidth
-        params.height = nextHeight
-        params.leftMargin = nextX
-        params.topMargin = nextY
-        cardContainer.layoutParams = params
-        cardBackground.cornerRadius = startRadius + (targetRadius - startRadius) * progress
-        val contentAlpha = ((progress - 0.2f) / 0.8f).coerceIn(0f, 1f)
-        cardContent.alpha = contentAlpha
-      }
-      animator.addListener(object : android.animation.AnimatorListenerAdapter() {
-        override fun onAnimationEnd(animation: android.animation.Animator) {
-          val params = cardContainer.layoutParams as FrameLayout.LayoutParams
-          params.width = targetWidth
-          params.height = targetHeight
-          params.leftMargin = targetX
-          params.topMargin = targetY
-          cardContainer.layoutParams = params
-          cardContent.alpha = 1f
-          isAnimatingForm = false
-        }
-      })
-      animator.start()
-    }
-
+    // Touch outside card to close
     root.setOnTouchListener { _, event ->
       if (event.action == MotionEvent.ACTION_DOWN) {
-        val cardRect = android.graphics.Rect()
-        cardContainer.getGlobalVisibleRect(cardRect)
-        if (!cardRect.contains(event.rawX.toInt(), event.rawY.toInt())) {
-          val imm = getSystemService(Context.INPUT_METHOD_SERVICE) as android.view.inputmethod.InputMethodManager
-          val isKeyboardOpen = imm.isAcceptingText
-          if (isKeyboardOpen) {
-            imm.hideSoftInputFromWindow(root.windowToken, 0)
-            root.clearFocus()
-          } else {
-            closeFormAndReturnBubble()
-          }
+        val rect = android.graphics.Rect()
+        cardContainer.getGlobalVisibleRect(rect)
+        if (!rect.contains(event.rawX.toInt(), event.rawY.toInt())) {
+          vibrateDevice(15)
+          closeFormAndReturnBubble()
           return@setOnTouchListener true
         }
       }
@@ -612,12 +795,11 @@ class SystemBubbleService : Service() {
       WindowManager.LayoutParams.MATCH_PARENT,
       type,
       WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN or
-        WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS or
-        WindowManager.LayoutParams.FLAG_NOT_TOUCH_MODAL,
+        WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS,
       PixelFormat.TRANSLUCENT
     ).apply {
-      gravity = Gravity.TOP or Gravity.START
-      softInputMode = WindowManager.LayoutParams.SOFT_INPUT_ADJUST_NOTHING
+      gravity = Gravity.CENTER
+      softInputMode = WindowManager.LayoutParams.SOFT_INPUT_ADJUST_RESIZE
     }
 
     wm.addView(root, params)
@@ -627,11 +809,30 @@ class SystemBubbleService : Service() {
     formContent = cardContent
     formBackground = cardBackground
     isAnimatingForm = false
+
+    // Animate dialog entrance with spring feel
+    cardContainer.scaleX = 0.82f
+    cardContainer.scaleY = 0.82f
+    cardContainer.alpha = 0f
+    cardContainer.animate()
+      .scaleX(1.0f)
+      .scaleY(1.0f)
+      .alpha(1.0f)
+      .setDuration(220)
+      .setInterpolator(OvershootInterpolator(1.25f))
+      .start()
+
+    cardContent.animate()
+      .alpha(1.0f)
+      .setDuration(180)
+      .start()
   }
 
   private fun hideForm() {
     val view = formView ?: return
-    windowManager?.removeView(view)
+    try {
+      windowManager?.removeView(view)
+    } catch (_: Exception) {}
     formView = null
     formRoot = null
     formCard = null
@@ -642,64 +843,25 @@ class SystemBubbleService : Service() {
 
   private fun closeFormAndReturnBubble() {
     if (isAnimatingForm) return
-
     val card = formCard
-    val root = formRoot
-    val content = formContent
-    val background = formBackground
-    if (card == null || root == null || content == null || background == null) {
+    if (card == null) {
       hideForm()
       showBubble(lastBubbleX, lastBubbleY)
-      snapBubbleToEdge()
-      return
-    }
-
-    val params = card.layoutParams as? FrameLayout.LayoutParams
-    if (params == null) {
-      hideForm()
-      showBubble(lastBubbleX, lastBubbleY)
-      snapBubbleToEdge()
       return
     }
 
     isAnimatingForm = true
-    val startWidth = card.width
-    val startHeight = card.height
-    val startX = params.leftMargin
-    val startY = params.topMargin
-    val bubbleSize = if (bubbleSizePx > 0) bubbleSizePx else dpToPx(56f)
-    val targetWidth = bubbleSize
-    val targetHeight = bubbleSize
-    val targetX = lastBubbleX
-    val targetY = lastBubbleY
-    val startRadius = background.cornerRadius
-    val targetRadius = bubbleSize / 2f
-
-    val animator = ValueAnimator.ofFloat(0f, 1f)
-    animator.duration = 220
-    animator.addUpdateListener { animation ->
-      val progress = animation.animatedValue as Float
-      val nextWidth = (startWidth + (targetWidth - startWidth) * progress).toInt()
-      val nextHeight = (startHeight + (targetHeight - startHeight) * progress).toInt()
-      val nextX = (startX + (targetX - startX) * progress).toInt()
-      val nextY = (startY + (targetY - startY) * progress).toInt()
-      params.width = nextWidth
-      params.height = nextHeight
-      params.leftMargin = nextX
-      params.topMargin = nextY
-      card.layoutParams = params
-      background.cornerRadius = startRadius + (targetRadius - startRadius) * progress
-      content.alpha = (1f - progress).coerceIn(0f, 1f)
-    }
-    animator.addListener(object : android.animation.AnimatorListenerAdapter() {
-      override fun onAnimationEnd(animation: android.animation.Animator) {
+    card.animate()
+      .scaleX(0.85f)
+      .scaleY(0.85f)
+      .alpha(0f)
+      .setDuration(160)
+      .withEndAction {
         hideForm()
         showBubble(lastBubbleX, lastBubbleY)
-        snapBubbleToEdge()
         isAnimatingForm = false
       }
-    })
-    animator.start()
+      .start()
   }
 
   private fun saveTransaction(
@@ -719,12 +881,10 @@ class SystemBubbleService : Service() {
     obj.put("type", type)
     obj.put("amount", amount)
     obj.put("note", note)
-    val isoFormat = java.text.SimpleDateFormat(
-      "yyyy-MM-dd'T'HH:mm:ss'Z'",
-      java.util.Locale.US
-    )
-    isoFormat.timeZone = java.util.TimeZone.getTimeZone("UTC")
-    obj.put("createdAt", isoFormat.format(java.util.Date(createdAtMillis)))
+    val isoFormat = SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ss'Z'", Locale.US).apply {
+      timeZone = TimeZone.getTimeZone("UTC")
+    }
+    obj.put("createdAt", isoFormat.format(Date(createdAtMillis)))
     obj.put("accountName", accountName)
     obj.put("accountType", accountType)
     obj.put("category", category)
@@ -754,8 +914,8 @@ class SystemBubbleService : Service() {
 
     return NotificationCompat.Builder(this, CHANNEL_ID)
       .setSmallIcon(R.mipmap.ic_launcher)
-      .setContentTitle("Fiscus bubble active")
-      .setContentText("Tap the bubble to add a transaction")
+      .setContentTitle("Fiscus Chat Head Active")
+      .setContentText("Tap to quick-log expense or income")
       .setOngoing(true)
       .build()
   }
@@ -770,8 +930,11 @@ class SystemBubbleService : Service() {
 
   private fun loadCategories(prefs: android.content.SharedPreferences): List<String> {
     val raw = prefs.getString(PREFS_KEY_CATEGORIES, null) ?: return listOf(
-      "Groceries",
+      "Food",
+      "Transport",
       "Bills",
+      "Shopping",
+      "Health",
       "Travel",
       "Salary",
       "Other",
@@ -785,9 +948,9 @@ class SystemBubbleService : Service() {
           items.add(value)
         }
       }
-      if (items.isEmpty()) listOf("Other") else items
+      if (items.isEmpty()) listOf("Food", "Shopping", "Bills", "Other") else items
     } catch (_: Exception) {
-      listOf("Other")
+      listOf("Food", "Shopping", "Bills", "Other")
     }
   }
 
@@ -818,30 +981,35 @@ class SystemBubbleService : Service() {
       val intent = Intent(Intent.ACTION_VIEW, Uri.parse("fiscus://add-account"))
       intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
       startActivity(intent)
-    } catch (_: Exception) {
-      // ignore
-    }
+    } catch (_: Exception) {}
   }
 
+  // --- Facebook Messenger Magnetic Close Target ---
   private fun showRemoveTarget() {
     if (removeTargetView != null) return
     val wm = windowManager ?: return
-    val targetSize = dpToPx(64f)
+    val targetSize = dpToPx(76f)
 
-    val targetLayout = FrameLayout(this)
+    val targetLayout = FrameLayout(this).apply {
+      clipChildren = false
+      clipToPadding = false
+    }
+
     val circle = FrameLayout(this).apply {
       val bg = GradientDrawable().apply {
         shape = GradientDrawable.OVAL
-        setColor(0xCC1F243A.toInt())
-        setStroke(dpToPx(2f), 0x88FFFFFF.toInt())
+        setColor(0xEE1A1E32.toInt())
+        setStroke(dpToPx(2.5f), 0x99FFFFFF.toInt())
       }
       background = bg
+      elevation = dpToPx(12f).toFloat()
     }
 
     val xIcon = TextView(this).apply {
       text = "✕"
-      textSize = 20f
-      setTextColor(0xFFFFFFFF.toInt())
+      textSize = 24f
+      setTypeface(typeface, Typeface.BOLD)
+      setTextColor(Color.WHITE)
       gravity = Gravity.CENTER
     }
     circle.addView(
@@ -865,43 +1033,37 @@ class SystemBubbleService : Service() {
     }
 
     val targetParams = WindowManager.LayoutParams(
-      targetSize + dpToPx(20f),
-      targetSize + dpToPx(20f),
+      targetSize + dpToPx(36f),
+      targetSize + dpToPx(36f),
       type,
       WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
         WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS,
       PixelFormat.TRANSLUCENT
     ).apply {
       gravity = Gravity.BOTTOM or Gravity.CENTER_HORIZONTAL
-      y = dpToPx(36f)
+      y = dpToPx(46f)
     }
-
-    targetLayout.alpha = 0f
-    targetLayout.translationY = dpToPx(24f).toFloat()
-    targetLayout.animate()
-      .alpha(1f)
-      .translationY(0f)
-      .setDuration(160)
-      .start()
 
     wm.addView(targetLayout, targetParams)
     removeTargetView = targetLayout
+
+    targetScaleSpring?.currentValue = 0.0
+    targetScaleSpring?.endValue = 1.0
   }
 
   private fun hideRemoveTarget() {
     val target = removeTargetView ?: return
     val wm = windowManager ?: return
-    target.animate()
-      .alpha(0f)
-      .translationY(dpToPx(24f).toFloat())
-      .setDuration(160)
-      .withEndAction {
-        try {
-          wm.removeView(target)
-        } catch (_: Exception) {}
+
+    targetScaleSpring?.endValue = 0.0
+    target.postDelayed({
+      try {
+        wm.removeView(target)
+      } catch (_: Exception) {}
+      if (removeTargetView == target) {
+        removeTargetView = null
       }
-      .start()
-    removeTargetView = null
+    }, 150)
     isOverRemoveTarget = false
   }
 
@@ -913,80 +1075,144 @@ class SystemBubbleService : Service() {
     val bg = circle.background as? GradientDrawable ?: return
 
     if (isHovering) {
-      bg.setColor(0xE6E53935.toInt())
-      bg.setStroke(dpToPx(2.5f), 0xFFFFFFFF.toInt())
-      circle.animate().scaleX(1.15f).scaleY(1.15f).setDuration(120).start()
+      // Facebook red alert dismiss
+      bg.setColor(0xEEFF3838.toInt())
+      bg.setStroke(dpToPx(3.5f), Color.WHITE)
+      targetScaleSpring?.endValue = 1.30
+      scaleSpring?.endValue = 0.65
+      vibrateDevice(35)
     } else {
-      bg.setColor(0xCC1F243A.toInt())
-      bg.setStroke(dpToPx(2f), 0x88FFFFFF.toInt())
-      circle.animate().scaleX(1f).scaleY(1f).setDuration(120).start()
+      bg.setColor(0xEE1A1E32.toInt())
+      bg.setStroke(dpToPx(2.5f), 0x99FFFFFF.toInt())
+      targetScaleSpring?.endValue = 1.0
+      scaleSpring?.endValue = 0.90
     }
   }
 
-  private inner class BubbleTouchListener : View.OnTouchListener {
+  private fun vibrateDevice(durationMs: Long) {
+    try {
+      val v = getSystemService(Context.VIBRATOR_SERVICE) as? Vibrator
+      if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+        v?.vibrate(VibrationEffect.createOneShot(durationMs, VibrationEffect.DEFAULT_AMPLITUDE))
+      } else {
+        @Suppress("DEPRECATION")
+        v?.vibrate(durationMs)
+      }
+    } catch (_: Exception) {}
+  }
+
+  // --- Facebook Messenger Touch & Spring Physics Listener ---
+  private inner class FacebookBubbleTouchListener : View.OnTouchListener {
     private var initialX = 0
     private var initialY = 0
     private var initialTouchX = 0f
     private var initialTouchY = 0f
     private var isClick = false
     private var downTime = 0L
+    private var velocityTracker: VelocityTracker? = null
 
-    private val clickSlop = dpToPx(6f)
-    private val longPressMs = 250L
+    private val clickSlop = dpToPx(8f)
+    private val clickTimeout = 250L
 
     override fun onTouch(v: View?, event: MotionEvent): Boolean {
       val params = layoutParams ?: return false
+
+      if (velocityTracker == null) {
+        velocityTracker = VelocityTracker.obtain()
+      }
+      velocityTracker?.addMovement(event)
+
       when (event.action) {
         MotionEvent.ACTION_DOWN -> {
+          // Stop any active snapping springs
+          springX?.setAtRest()
+          springY?.setAtRest()
+
           isClick = true
           initialX = params.x
           initialY = params.y
           initialTouchX = event.rawX
           initialTouchY = event.rawY
           downTime = System.currentTimeMillis()
-          showRemoveTarget()
+
+          // Facebook spring scale-down feedback on press + tactile tick
+          vibrateDevice(15)
+          scaleSpring?.endValue = 0.90
           return true
         }
+
         MotionEvent.ACTION_MOVE -> {
           val dx = (event.rawX - initialTouchX).toInt()
           val dy = (event.rawY - initialTouchY).toInt()
-          if (kotlin.math.abs(dx) > clickSlop || kotlin.math.abs(dy) > clickSlop) {
-            isClick = false
+
+          if (abs(dx) > clickSlop || abs(dy) > clickSlop) {
+            if (isClick) {
+              isClick = false
+              showRemoveTarget()
+            }
           }
 
-          val metrics = resources.displayMetrics
-          val screenWidth = metrics.widthPixels
-          val screenHeight = metrics.heightPixels
-          val targetCenterX = screenWidth / 2
-          val targetCenterY = screenHeight - dpToPx(68f)
+          if (!isClick) {
+            val metrics = resources.displayMetrics
+            val screenWidth = metrics.widthPixels
+            val screenHeight = metrics.heightPixels
+            val targetCenterX = screenWidth / 2
+            val targetCenterY = screenHeight - dpToPx(102f)
 
-          val currentX = initialX + dx
-          val currentY = initialY + dy
-          val bubbleCenterX = currentX + bubbleSizePx / 2
-          val bubbleCenterY = currentY + bubbleSizePx / 2
+            val currentX = initialX + dx
+            val currentY = initialY + dy
+            val bubbleCenterX = currentX + bubbleSizePx / 2
+            val bubbleCenterY = currentY + bubbleSizePx / 2
 
-          val distSq = (bubbleCenterX - targetCenterX) * (bubbleCenterX - targetCenterX) +
-                       (bubbleCenterY - targetCenterY) * (bubbleCenterY - targetCenterY)
-          val snapThreshold = dpToPx(85f)
+            val dist = sqrt(
+              ((bubbleCenterX - targetCenterX) * (bubbleCenterX - targetCenterX) +
+               (bubbleCenterY - targetCenterY) * (bubbleCenterY - targetCenterY)).toDouble()
+            ).toFloat()
 
-          if (distSq < snapThreshold * snapThreshold) {
-            updateRemoveTargetState(true)
-            params.x = targetCenterX - bubbleSizePx / 2
-            params.y = targetCenterY - bubbleSizePx / 2
-          } else {
-            updateRemoveTargetState(false)
-            params.x = currentX
-            params.y = currentY
+            val snapThreshold = dpToPx(130f).toFloat()
+
+            if (dist < snapThreshold) {
+              updateRemoveTargetState(true)
+              // Magnetic suction into target center
+              params.x = targetCenterX - bubbleSizePx / 2
+              params.y = targetCenterY - bubbleSizePx / 2
+              bubbleView?.rotation = 0f
+            } else {
+              updateRemoveTargetState(false)
+              params.x = currentX
+              params.y = currentY
+              // Messenger drag tilt wobble effect
+              bubbleView?.rotation = (dx / 18f).coerceIn(-16f, 16f)
+            }
+
+            lastBubbleX = params.x
+            lastBubbleY = params.y
+            try {
+              windowManager?.updateViewLayout(bubbleView, params)
+            } catch (_: Exception) {}
           }
-
-          windowManager?.updateViewLayout(bubbleView, params)
           return true
         }
-        MotionEvent.ACTION_UP -> {
-          val duration = System.currentTimeMillis() - downTime
-          hideRemoveTarget()
 
-          if (isOverRemoveTarget) {
+        MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> {
+          val duration = System.currentTimeMillis() - downTime
+
+          velocityTracker?.computeCurrentVelocity(1000)
+          val vx = velocityTracker?.xVelocity ?: 0f
+          val vy = velocityTracker?.yVelocity ?: 0f
+          velocityTracker?.recycle()
+          velocityTracker = null
+
+          val wasOverTarget = isOverRemoveTarget
+          hideRemoveTarget()
+          scaleSpring?.endValue = 1.0
+
+          // Smoothly reset tilt angle
+          bubbleView?.animate()?.rotation(0f)?.setDuration(180)?.start()
+
+          if (wasOverTarget) {
+            // Dismiss bubble with scale-down collapse & vibration
+            vibrateDevice(50)
             bubbleView?.animate()
               ?.scaleX(0f)?.scaleY(0f)?.alpha(0f)
               ?.setDuration(160)
@@ -1000,14 +1226,13 @@ class SystemBubbleService : Service() {
             return true
           }
 
-          if (isClick && duration < longPressMs) {
+          if (isClick && duration < clickTimeout) {
             handleBubbleClick()
+            return true
           }
-          lastBubbleX = params.x
-          lastBubbleY = params.y
-          if (!isClick) {
-            snapBubbleToEdge()
-          }
+
+          // Use Facebook Rebound physics to snap to nearest edge
+          snapBubbleToEdgeRebound(vx)
           return true
         }
       }
@@ -1015,49 +1240,42 @@ class SystemBubbleService : Service() {
     }
   }
 
-  private fun snapBubbleToEdge() {
+  /**
+   * Snaps the floating chat head to either left or right edge of the screen using
+   * Facebook Rebound spring physics.
+   */
+  private fun snapBubbleToEdgeRebound(flingVelocityX: Float) {
     val params = layoutParams ?: return
     val metrics = resources.displayMetrics
     val screenWidth = metrics.widthPixels
     val screenHeight = metrics.heightPixels
-    val edgeX = if (params.x + bubbleSizePx / 2 < screenWidth / 2) 0
-    else screenWidth - bubbleSizePx
-    val clampedY = params.y.coerceIn(0, screenHeight - bubbleSizePx)
-    val startX = params.x
-    val startY = params.y
-    val animator = ValueAnimator.ofFloat(0f, 1f)
-    animator.duration = 280
-    animator.interpolator = OvershootInterpolator(1.25f)
-    animator.addUpdateListener { valueAnimator ->
-      val t = valueAnimator.animatedValue as Float
-      params.x = (startX + (edgeX - startX) * t).toInt()
-      params.y = (startY + (clampedY - startY) * t).toInt()
-      windowManager?.updateViewLayout(bubbleView, params)
-      lastBubbleX = params.x
-      lastBubbleY = params.y
+
+    val bubbleCenter = params.x + bubbleSizePx / 2
+    val edgeMargin = dpToPx(8f)
+
+    // Determine target X based on center or fling velocity
+    val targetX = when {
+      flingVelocityX > 900 -> screenWidth - bubbleSizePx - edgeMargin
+      flingVelocityX < -900 -> edgeMargin
+      bubbleCenter < screenWidth / 2 -> edgeMargin
+      else -> screenWidth - bubbleSizePx - edgeMargin
     }
-    animator.start()
-  }
 
-  private fun moveBubbleToCenter() {
-    val params = layoutParams ?: return
-    val metrics = resources.displayMetrics
-    val screenWidth = metrics.widthPixels
-    val screenHeight = metrics.heightPixels
-    val targetX = (screenWidth - bubbleSizePx) / 2
-    val targetY = (screenHeight - bubbleSizePx) / 2
-    params.x = targetX
-    params.y = targetY
-    windowManager?.updateViewLayout(bubbleView, params)
-    lastBubbleX = params.x
-    lastBubbleY = params.y
-  }
+    val topLimit = dpToPx(40f)
+    val bottomLimit = screenHeight - bubbleSizePx - dpToPx(70f)
+    val clampedY = params.y.coerceIn(topLimit, bottomLimit)
 
-  // keep bubble on the nearest side edge
+    springX?.currentValue = params.x.toDouble()
+    springX?.velocity = flingVelocityX.toDouble()
+    springX?.endValue = targetX.toDouble()
+
+    springY?.currentValue = params.y.toDouble()
+    springY?.endValue = clampedY.toDouble()
+  }
 
   private fun getCurrencySymbol(): String {
     val prefs = getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
-    return prefs.getString(PREFS_KEY_CURRENCY, "$" ) ?: "$"
+    return prefs.getString(PREFS_KEY_CURRENCY, "$") ?: "$"
   }
 
   companion object {

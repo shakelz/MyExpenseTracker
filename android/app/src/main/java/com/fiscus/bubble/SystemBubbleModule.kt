@@ -129,6 +129,16 @@ class SystemBubbleModule(private val reactContext: ReactApplicationContext) :
     prefs.edit().putString(SystemBubbleService.PREFS_KEY_CURRENCY, symbol).apply()
   }
 
+  @ReactMethod
+  fun launchNativeBubble(promise: Promise) {
+    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+      BubbleNotificationHelper.showNativeBubble(reactContext)
+      promise.resolve(true)
+    } else {
+      promise.resolve(false)
+    }
+  }
+
   private fun startBubbleService(intent: Intent) {
     if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
       reactContext.startForegroundService(intent)

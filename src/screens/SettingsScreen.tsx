@@ -2,10 +2,12 @@ import React, { useEffect, useState } from 'react';
 import {
   ActivityIndicator,
   Alert,
+  Keyboard,
   Modal,
   NativeModules,
   Pressable,
   ScrollView,
+  Share,
   StyleSheet,
   Switch,
   Text,
@@ -62,6 +64,8 @@ export default function SettingsScreen({
   const [isRestoring, setIsRestoring] = useState(false);
   const [backupFrequency, setBackupFrequency] = useState('Daily');
   const [backupCellular, setBackupCellular] = useState(true);
+  const [isRestoreModalOpen, setRestoreModalOpen] = useState(false);
+  const [restoreJsonText, setRestoreJsonText] = useState('');
 
   // Load saved backup metadata on mount
   useEffect(() => {
@@ -149,10 +153,23 @@ export default function SettingsScreen({
 
       Alert.alert(
         'Backup Successful',
-        `All data backed up to Google Drive (${googleAccount}).\nSize: ${sizeKb} · ${recordsStr}`,
+        `All data backed up to Google Drive & local storage (${googleAccount}).\nSize: ${sizeKb} · ${recordsStr}`,
+        [
+          { text: 'Done' },
+          {
+            text: 'Share / Save File',
+            onPress: () => {
+              Share.share({
+                title: 'Fiscus_Backup.json',
+                message: backupJson,
+              }).catch(() => null);
+            },
+          },
+        ],
       );
-    } catch {
-      Alert.alert('Backup Error', 'Failed to generate backup snapshot.');
+    } catch (err: any) {
+      console.error('Backup snapshot error:', err);
+      Alert.alert('Backup Error', `Failed to generate backup snapshot: ${err?.message || 'Unknown error'}`);
     } finally {
       setIsBackingUp(false);
     }
@@ -165,14 +182,14 @@ export default function SettingsScreen({
       if (!savedBackup) {
         Alert.alert(
           'No Backup Found',
-          'No previous backup found on this device or Google Drive. Tap "Back Up Now" first.',
+          'No previous backup found on this device or Google Drive. Tap "Back Up Now" first or use "Restore from JSON".',
         );
         return;
       }
 
       Alert.alert(
         'Restore from Google Drive',
-        `Are you sure you want to restore data from backup (${lastBackupTime})? Current data will be safely merged and updated.`,
+        `Are you sure you want to restore data from backup (${lastBackupTime})? Current data will be safely updated.`,
         [
           { text: 'Cancel', style: 'cancel' },
           {
@@ -185,8 +202,8 @@ export default function SettingsScreen({
                   'Restore Complete',
                   `Successfully restored:\n• ${res.accountsCount} Accounts\n• ${res.transactionsCount} Transactions\n• ${res.debtsCount} Debts`,
                 );
-              } catch {
-                Alert.alert('Error', 'Failed to restore backup data.');
+              } catch (err: any) {
+                Alert.alert('Error', `Failed to restore backup data: ${err?.message || 'Unknown error'}`);
               } finally {
                 setIsRestoring(false);
               }
@@ -196,6 +213,30 @@ export default function SettingsScreen({
       );
     } catch {
       Alert.alert('Error', 'Failed to retrieve backup file.');
+    }
+  };
+
+  const handleRestoreCustomJson = async () => {
+    if (!restoreJsonText.trim()) {
+      Alert.alert('Required', 'Please paste valid backup JSON data.');
+      return;
+    }
+    if (!onRestoreBackup) return;
+    Keyboard.dismiss();
+    setIsRestoring(true);
+    try {
+      const res = await onRestoreBackup(restoreJsonText.trim());
+      await setLocalSetting('latest_backup_data', restoreJsonText.trim());
+      setRestoreModalOpen(false);
+      setRestoreJsonText('');
+      Alert.alert(
+        'Restore Complete',
+        `Successfully restored:\n• ${res.accountsCount} Accounts\n• ${res.transactionsCount} Transactions\n• ${res.debtsCount} Debts`,
+      );
+    } catch (err: any) {
+      Alert.alert('Restore Error', `Failed to restore JSON: ${err?.message || 'Invalid format'}`);
+    } finally {
+      setIsRestoring(false);
     }
   };
 
@@ -279,6 +320,35 @@ export default function SettingsScreen({
             </Pressable>
           </View>
 
+          {/* Secondary Backup Action Buttons: Share & Import */}
+          <View style={styles.backupSecondaryButtonsRow}>
+            <Pressable
+              style={styles.whatsAppShareBtn}
+              onPress={async () => {
+                try {
+                  const backupJson = await onExportBackup?.();
+                  if (backupJson) {
+                    await Share.share({
+                      title: 'Fiscus_Backup.json',
+                      message: backupJson,
+                    });
+                  }
+                } catch {
+                  Alert.alert('Error', 'Failed to share backup file.');
+                }
+              }}
+            >
+              <Text style={styles.whatsAppShareBtnText}>📤 Share Backup</Text>
+            </Pressable>
+
+            <Pressable
+              style={styles.whatsAppImportBtn}
+              onPress={() => setRestoreModalOpen(true)}
+            >
+              <Text style={styles.whatsAppImportBtnText}>📥 Restore from JSON</Text>
+            </Pressable>
+          </View>
+
           {/* Backup Options */}
           <View style={styles.backupOptionsDivider} />
 
@@ -357,6 +427,35 @@ export default function SettingsScreen({
                 SMS (Meezan, HBL, Easypaisa, JazzCash, SadaPay, NayaPay, etc.)
                 and adds them directly into the app.
               </Text>
+            </View>
+          </View>
+
+          {/* Smart Protection Features */}
+          <View style={styles.featureCardsContainer}>
+            <View style={styles.featureCard}>
+              <Text style={styles.featureIcon}>🛡️</Text>
+              <View style={{ flex: 1, marginLeft: 10 }}>
+                <Text style={styles.featureTitle}>Multi-App Deduplication</Text>
+                <Text style={styles.featureDesc}>
+                  Automatically prevents duplicate entries when Bank App & SMS notify for the same payment.
+                </Text>
+              </View>
+              <View style={styles.activePill}>
+                <Text style={styles.activePillText}>Active</Text>
+              </View>
+            </View>
+
+            <View style={styles.featureCard}>
+              <Text style={styles.featureIcon}>🚫</Text>
+              <View style={{ flex: 1, marginLeft: 10 }}>
+                <Text style={styles.featureTitle}>Spam & Temu Shield</Text>
+                <Text style={styles.featureDesc}>
+                  Automatically blocks promo offers, coupons, flash sales, and shopping apps (Temu, Daraz, etc.).
+                </Text>
+              </View>
+              <View style={styles.activePill}>
+                <Text style={styles.activePillText}>Active</Text>
+              </View>
             </View>
           </View>
 
@@ -527,6 +626,47 @@ export default function SettingsScreen({
           </View>
         </View>
       </Modal>
+
+      {/* RESTORE FROM JSON MODAL */}
+      <Modal
+        visible={isRestoreModalOpen}
+        animationType="slide"
+        transparent
+        onRequestClose={() => setRestoreModalOpen(false)}
+      >
+        <View style={styles.modalOverlay}>
+          <View style={styles.modalCard}>
+            <View style={styles.modalHeader}>
+              <Text style={styles.modalTitle}>Restore from Backup JSON</Text>
+              <Pressable onPress={() => setRestoreModalOpen(false)}>
+                <Text style={styles.modalCloseText}>✕</Text>
+              </Pressable>
+            </View>
+            <Text style={styles.modalDesc}>
+              Paste your exported Fiscus backup JSON text below to restore your accounts, transactions, and loans.
+            </Text>
+            <TextInput
+              style={[styles.textInput, { height: 110, textAlignVertical: 'top' }]}
+              placeholder='Paste JSON here (e.g. {"version": 1, ...})'
+              placeholderTextColor="#6B7280"
+              multiline
+              value={restoreJsonText}
+              onChangeText={setRestoreJsonText}
+            />
+            <Pressable
+              style={[styles.connectAccountBtn, isRestoring && { opacity: 0.7 }]}
+              onPress={handleRestoreCustomJson}
+              disabled={isRestoring}
+            >
+              {isRestoring ? (
+                <ActivityIndicator color="#FFFFFF" size="small" />
+              ) : (
+                <Text style={styles.connectAccountBtnText}>Restore Data Now</Text>
+              )}
+            </Pressable>
+          </View>
+        </View>
+      </Modal>
     </View>
   );
 }
@@ -538,7 +678,7 @@ const styles = StyleSheet.create({
   },
   content: {
     paddingHorizontal: 20,
-    paddingBottom: 40,
+    paddingBottom: 130,
   },
   title: {
     fontSize: 22,
@@ -695,6 +835,41 @@ const styles = StyleSheet.create({
     color: '#6EE7B7',
     fontSize: 13,
     fontWeight: '800',
+  },
+  backupSecondaryButtonsRow: {
+    flexDirection: 'row',
+    gap: 10,
+    marginBottom: 14,
+  },
+  whatsAppShareBtn: {
+    flex: 1,
+    backgroundColor: 'rgba(255, 255, 255, 0.08)',
+    paddingVertical: 10,
+    borderRadius: 10,
+    alignItems: 'center',
+    justifyContent: 'center',
+    borderWidth: 1,
+    borderColor: 'rgba(255, 255, 255, 0.15)',
+  },
+  whatsAppShareBtnText: {
+    color: '#FFFFFF',
+    fontSize: 12,
+    fontWeight: '700',
+  },
+  whatsAppImportBtn: {
+    flex: 1,
+    backgroundColor: 'rgba(255, 255, 255, 0.08)',
+    paddingVertical: 10,
+    borderRadius: 10,
+    alignItems: 'center',
+    justifyContent: 'center',
+    borderWidth: 1,
+    borderColor: 'rgba(110, 231, 183, 0.3)',
+  },
+  whatsAppImportBtnText: {
+    color: '#6EE7B7',
+    fontSize: 12,
+    fontWeight: '700',
   },
   backupOptionsDivider: {
     height: 1,
@@ -856,6 +1031,12 @@ const styles = StyleSheet.create({
     marginBottom: 14,
     lineHeight: 16,
   },
+  modalDesc: {
+    fontSize: 12,
+    color: 'rgba(255, 255, 255, 0.65)',
+    marginBottom: 14,
+    lineHeight: 16,
+  },
   modalCloseText: {
     fontSize: 18,
     color: '#9CA3AF',
@@ -901,5 +1082,47 @@ const styles = StyleSheet.create({
     color: '#FFFFFF',
     fontSize: 13,
     fontWeight: '700',
+  },
+  featureCardsContainer: {
+    marginTop: 12,
+    marginBottom: 14,
+    gap: 8,
+  },
+  featureCard: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: 'rgba(255, 255, 255, 0.04)',
+    padding: 10,
+    borderRadius: 10,
+    borderWidth: 1,
+    borderColor: 'rgba(255, 255, 255, 0.08)',
+  },
+  featureIcon: {
+    fontSize: 18,
+  },
+  featureTitle: {
+    fontSize: 12,
+    fontWeight: '700',
+    color: '#FFFFFF',
+    marginBottom: 2,
+  },
+  featureDesc: {
+    fontSize: 11,
+    color: 'rgba(255, 255, 255, 0.6)',
+    lineHeight: 15,
+  },
+  activePill: {
+    backgroundColor: 'rgba(16, 185, 129, 0.15)',
+    paddingHorizontal: 8,
+    paddingVertical: 3,
+    borderRadius: 12,
+    borderWidth: 1,
+    borderColor: 'rgba(16, 185, 129, 0.4)',
+    marginLeft: 6,
+  },
+  activePillText: {
+    color: '#6EE7B7',
+    fontSize: 10,
+    fontWeight: '800',
   },
 });
