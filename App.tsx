@@ -30,6 +30,7 @@ import UndoSnackbar from './src/components/UndoSnackbar';
 import { Account, Debt, DebtTransaction, DebtType, QuickTransaction } from './src/data/models';
 import AnalysisScreen from './src/screens/AnalysisScreen';
 import LoansScreen from './src/screens/LoansScreen';
+import AIScreen from './src/screens/AIScreen';
 import SettingsScreen, { CountryOption } from './src/screens/SettingsScreen';
 import {
   checkOverlayPermission,
@@ -95,7 +96,7 @@ function AppContent() {
   const [accounts, setAccounts] = useState<Account[]>([]);
   const [debts, setDebts] = useState<Debt[]>([]);
   const [activeScreen, setActiveScreen] = useState<
-    'home' | 'loans' | 'analysis' | 'settings'
+    'home' | 'loans' | 'analysis' | 'ai' | 'settings'
   >('home');
   const [editingTransaction, setEditingTransaction] = useState<
     QuickTransaction | null
@@ -588,13 +589,8 @@ function AppContent() {
             item.id === entry.id ? result.transaction : item,
           ),
         );
-        setAccounts(current => {
-          let next = [...current];
-          result.accounts.forEach(account => {
-            next = next.map(item => (item.id === account.id ? account : item));
-          });
-          return next;
-        });
+        const freshAccounts = await fetchLocalAccounts();
+        setAccounts(freshAccounts);
       } else {
         const result = await createLocalTransaction({
           type: entry.type,
@@ -742,6 +738,15 @@ function AppContent() {
           transactions={transactions}
           accounts={accounts}
           currencySymbol={currencySymbol}
+          onBack={() => setActiveScreen('home')}
+        />
+      ) : activeScreen === 'ai' ? (
+        <AIScreen
+          transactions={transactions}
+          accounts={accounts}
+          debts={debts}
+          currencySymbol={currencySymbol}
+          onAddTransaction={handleSubmitTransaction}
           onBack={() => setActiveScreen('home')}
         />
       ) : activeScreen === 'settings' ? (
@@ -1022,6 +1027,23 @@ function AppContent() {
             ]}
           >
             Insights
+          </Text>
+        </Pressable>
+        <Pressable
+          style={[
+            styles.tabItem,
+            activeScreen === 'ai' && styles.tabItemActive,
+          ]}
+          onPress={() => setActiveScreen('ai')}
+        >
+          <Text style={[styles.tabIcon, activeScreen === 'ai' && styles.tabIconActive]}>✨</Text>
+          <Text
+            style={[
+              styles.tabText,
+              activeScreen === 'ai' && styles.tabTextActive,
+            ]}
+          >
+            AI Copilot
           </Text>
         </Pressable>
         <Pressable

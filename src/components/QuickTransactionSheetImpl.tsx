@@ -18,6 +18,7 @@ import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import DateTimePicker from '@react-native-community/datetimepicker';
 import { Account, QuickTransaction, TransactionType } from '../data/models';
 import { EXPENSE_CATEGORIES, INCOME_CATEGORIES } from '../data/categories';
+import { predictCategory } from '../services/aiAdvisorService';
 
 export type QuickTransactionSheetProps = {
   visible: boolean;
@@ -90,6 +91,7 @@ export default function QuickTransactionSheet({
     };
   }, []);
 
+  // Initialize sheet state only when opened or initialValue changes (NOT on account click!)
   useEffect(() => {
     if (!visible && !embedded) {
       return;
@@ -98,20 +100,48 @@ export default function QuickTransactionSheet({
       setType(initialValue.type);
       setAmount(String(initialValue.amount));
       setNote(initialValue.note ?? '');
-      setSelectedAccountId(initialValue.accountId ?? null);
+      // Match existing account by ID or by name
+      const matched = accounts.find(
+        a =>
+          (initialValue.accountId && a.id === initialValue.accountId) ||
+          (initialValue.accountName && a.name.toLowerCase() === initialValue.accountName.toLowerCase()),
+      );
+      setSelectedAccountId(matched?.id ?? initialValue.accountId ?? (accounts[0]?.id ?? null));
       setCategory(initialValue.category ?? null);
       setSelectedDate(initialValue.createdAt ? new Date(initialValue.createdAt) : new Date());
       return;
     }
+    // New transaction
+    setType(defaultType);
+    setAmount('');
+    setNote('');
     setSelectedDate(new Date());
-    if (!selectedAccountId && accounts.length > 0) {
-      setSelectedAccountId(accounts[0].id);
+    setSelectedAccountId(accounts[0]?.id ?? null);
+    const defaults = defaultType === 'expense' ? EXPENSE_CATEGORIES : INCOME_CATEGORIES;
+    setCategory(defaults[0] ?? null);
+  }, [visible, embedded, initialValue]);
+
+  // AI Category Suggestion based on note
+  const aiSuggestedCategory = useMemo(() => predictCategory(note, type), [note, type]);
+
+  const handleTypeChange = (newType: TransactionType) => {
+    setType(newType);
+    const defaults = newType === 'expense' ? EXPENSE_CATEGORIES : INCOME_CATEGORIES;
+    const isCurrentValid = category ? defaults.includes(category) : false;
+    if (!isCurrentValid) {
+      const suggested = predictCategory(note, newType);
+      setCategory(suggested ?? defaults[0] ?? null);
     }
-    const defaults = type === 'expense' ? EXPENSE_CATEGORIES : INCOME_CATEGORIES;
-    if (!category && defaults.length > 0) {
-      setCategory(defaults[0]);
+  };
+
+  const handleNoteChange = (text: string) => {
+    setNote(text);
+    const suggested = predictCategory(text, type);
+    // If user has not picked a specific category yet or it's default General, auto-suggest
+    if (suggested && (!category || category === 'General Expense' || category === 'Salary')) {
+      setCategory(suggested);
     }
-  }, [accounts, category, embedded, initialValue, selectedAccountId, type, visible]);
+  };
 
   const handleSubmit = () => {
     const numericAmount = Number(amount);
@@ -181,7 +211,7 @@ export default function QuickTransactionSheet({
       </View>
       <View style={styles.toggleRow}>
         <Pressable
-          onPress={() => setType('expense')}
+          onPress={() => handleTypeChange('expense')}
           style={[styles.toggleButton, type === 'expense' && styles.toggleActive]}
         >
           <Text style={[styles.toggleText, type === 'expense' && styles.toggleTextActive]}>
@@ -189,7 +219,7 @@ export default function QuickTransactionSheet({
           </Text>
         </Pressable>
         <Pressable
-          onPress={() => setType('income')}
+          onPress={() => handleTypeChange('income')}
           style={[styles.toggleButton, type === 'income' && styles.toggleActive]}
         >
           <Text style={[styles.toggleText, type === 'income' && styles.toggleTextActive]}>
@@ -237,6 +267,16 @@ export default function QuickTransactionSheet({
       )}
       <View style={styles.categoryHeader}>
         <Text style={styles.label}>Category</Text>
+        {aiSuggestedCategory && aiSuggestedCategory !== category && (
+          <Pressable
+            style={styles.aiSuggestionBadge}
+            onPress={() => setCategory(aiSuggestedCategory)}
+          >
+            <Text style={styles.aiSuggestionBadgeText}>
+              ✨ AI: {aiSuggestedCategory}
+            </Text>
+          </Pressable>
+        )}
       </View>
       <View style={styles.categoryRow}>
         {(type === 'expense' ? EXPENSE_CATEGORIES : INCOME_CATEGORIES).map(item => (
@@ -276,8 +316,8 @@ export default function QuickTransactionSheet({
       <Text style={styles.label}>Note</Text>
       <TextInput
         value={note}
-        onChangeText={setNote}
-        placeholder="Optional note"
+        onChangeText={handleNoteChange}
+        placeholder="Optional note (e.g. Starbucks, Uber, Salary)"
         placeholderTextColor="#9E9E9E"
         style={styles.noteInput}
         multiline
@@ -479,7 +519,25 @@ const styles = StyleSheet.create({
     marginTop: 2,
   },
   categoryHeader: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
     marginBottom: 6,
+  },
+  aiSuggestionBadge: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: '#EEF2FF',
+    borderWidth: 1,
+    borderColor: '#C7D2FE',
+    paddingHorizontal: 8,
+    paddingVertical: 3,
+    borderRadius: 8,
+  },
+  aiSuggestionBadgeText: {
+    fontSize: 11,
+    fontWeight: '700',
+    color: '#4F46E5',
   },
   categoryRow: {
     flexDirection: 'row',

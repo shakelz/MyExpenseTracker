@@ -820,8 +820,17 @@ async function findAccountByIdOrName(
   }
   if (accountName && accountType) {
     const [result] = await db.executeSql(
-      'SELECT * FROM accounts WHERE name = ? AND type = ? LIMIT 1',
-      [accountName, accountType],
+      'SELECT * FROM accounts WHERE LOWER(name) = LOWER(?) AND LOWER(type) = LOWER(?) LIMIT 1',
+      [accountName.trim(), accountType.trim()],
+    );
+    if (result.rows.length) {
+      return toAccount(result.rows.item(0));
+    }
+  }
+  if (accountName) {
+    const [result] = await db.executeSql(
+      'SELECT * FROM accounts WHERE LOWER(name) = LOWER(?) LIMIT 1',
+      [accountName.trim()],
     );
     if (result.rows.length) {
       return toAccount(result.rows.item(0));
