@@ -131,6 +131,10 @@ export async function ensureTablesAndMigrations(db: SQLiteDatabase): Promise<voi
 
   // Ensure NULL values in existing debts are filled
   try {
+    // Populate missing/null/invalid id column values with rowid so each row has a guaranteed unique permanent ID
+    await db.executeSql(
+      "UPDATE debts SET id = CAST(rowid AS TEXT) WHERE id IS NULL OR id = '' OR id = 'null' OR id = 'undefined';",
+    );
     await db.executeSql(
       'UPDATE debts SET remaining_amount = amount WHERE remaining_amount IS NULL;',
     );
@@ -143,6 +147,11 @@ export async function ensureTablesAndMigrations(db: SQLiteDatabase): Promise<voi
     await db.executeSql(
       'UPDATE debts SET date = created_at WHERE date IS NULL OR date = \'\';',
     );
+    try {
+      await db.executeSql(
+        "UPDATE debts SET note = notes WHERE (note IS NULL OR note = '') AND notes IS NOT NULL;",
+      );
+    } catch {}
   } catch (e) {
     // ignore
   }
@@ -348,19 +357,25 @@ export async function clearLocalData(): Promise<void> {
   await db.executeSql('DELETE FROM accounts');
 }
 
-const toDebt = (row: any): Debt => ({
-  id: String(row.id),
-  personName: row.person_name || row.personName || '',
-  phone: row.phone || undefined,
-  type: (row.type === 'borrowed' ? 'borrowed' : 'lent') as DebtType,
-  amount: Number(row.amount || 0),
-  remainingAmount: Number(row.remaining_amount ?? row.remainingAmount ?? row.amount ?? 0),
-  note: row.note || undefined,
-  dueDate: row.due_date || row.dueDate || undefined,
-  status: (row.status || 'pending') as DebtStatus,
-  createdAt: row.created_at || row.createdAt || new Date().toISOString(),
-  updatedAt: row.updated_at || row.updatedAt || new Date().toISOString(),
-});
+const toDebt = (row: any): Debt => {
+  let resolvedId = row.id;
+  if (!resolvedId || resolvedId === 'null' || resolvedId === 'undefined') {
+    resolvedId = row.rowid ? String(row.rowid) : `${Date.now()}-${Math.random().toString(36).substring(2, 7)}`;
+  }
+  return {
+    id: String(resolvedId),
+    personName: row.person_name || row.personName || '',
+    phone: row.phone || undefined,
+    type: (row.type === 'borrowed' ? 'borrowed' : 'lent') as DebtType,
+    amount: Number(row.amount || 0),
+    remainingAmount: Number(row.remaining_amount ?? row.remainingAmount ?? row.amount ?? 0),
+    note: row.note || row.notes || undefined,
+    dueDate: row.due_date || row.dueDate || undefined,
+    status: (row.status || 'pending') as DebtStatus,
+    createdAt: row.created_at || row.createdAt || new Date().toISOString(),
+    updatedAt: row.updated_at || row.updatedAt || new Date().toISOString(),
+  };
+};
 
 const toDebtTransaction = (row: any): DebtTransaction => ({
   id: String(row.id),
@@ -376,11 +391,11 @@ export async function fetchLocalDebts(): Promise<Debt[]> {
   let result;
   try {
     [result] = await db.executeSql(
-      'SELECT * FROM debts ORDER BY updated_at DESC, id DESC',
+      'SELECT rowid, * FROM debts ORDER BY updated_at DESC, rowid DESC',
     );
   } catch {
     try {
-      [result] = await db.executeSql('SELECT * FROM debts ORDER BY id DESC');
+      [result] = await db.executeSql('SELECT rowid, * FROM debts ORDER BY rowid DESC');
     } catch {
       return [];
     }
@@ -394,6 +409,7 @@ export async function fetchLocalDebts(): Promise<Debt[]> {
 }
 
 export async function createLocalDebt(payload: {
+  id?: string;
   personName: string;
   phone?: string;
   type: DebtType;
@@ -404,9 +420,11 @@ export async function createLocalDebt(payload: {
   const db = await getDb();
   const now = new Date().toISOString();
   const amount = Number(payload.amount || 0);
+  const debtId = payload.id || `${Date.now()}-${Math.random().toString(36).substring(2, 7)}`;
 
   // Guarantee columns exist
   await ensureColumns(db, 'debts', {
+    id: 'TEXT PRIMARY KEY',
     phone: 'TEXT',
     remaining_amount: 'REAL DEFAULT 0',
     note: 'TEXT',
@@ -417,10 +435,11 @@ export async function createLocalDebt(payload: {
     updated_at: 'TEXT DEFAULT CURRENT_TIMESTAMP',
   });
 
-  const result = await db.executeSql(
-    `INSERT INTO debts (person_name, phone, type, amount, remaining_amount, note, due_date, date, status, created_at, updated_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?)`,
+  await db.executeSql(
+    `INSERT INTO debts (id, person_name, phone, type, amount, remaining_amount, note, due_date, date, status, created_at, updated_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?)`,
     [
+      debtId,
       payload.personName,
       payload.phone || null,
       payload.type,
@@ -434,58 +453,19 @@ export async function createLocalDebt(payload: {
     ],
   );
 
-  let insertId = result && result[0] ? result[0].insertId : undefined;
-  if (!insertId || insertId <= 0) {
-    try {
-      const [lastRes] = await db.executeSql('SELECT last_insert_rowid() as id');
-      if (lastRes && lastRes.rows.length > 0) {
-        insertId = lastRes.rows.item(0).id;
-      }
-    } catch {
-      // ignore
-    }
-  }
-
-  let createdDebt: Debt | null = null;
-  if (insertId) {
-    try {
-      const [rowResult] = await db.executeSql('SELECT * FROM debts WHERE id = ?', [insertId]);
-      if (rowResult && rowResult.rows.length > 0) {
-        createdDebt = toDebt(rowResult.rows.item(0));
-      }
-    } catch {
-      // ignore
-    }
-  }
-
-  if (!createdDebt) {
-    try {
-      const [latest] = await db.executeSql('SELECT * FROM debts ORDER BY id DESC LIMIT 1');
-      if (latest && latest.rows.length > 0) {
-        createdDebt = toDebt(latest.rows.item(0));
-      }
-    } catch {
-      // ignore
-    }
-  }
-
-  if (!createdDebt) {
-    createdDebt = {
-      id: String(insertId || Date.now()),
-      personName: payload.personName,
-      phone: payload.phone,
-      type: payload.type,
-      amount,
-      remainingAmount: amount,
-      note: payload.note,
-      dueDate: payload.dueDate,
-      status: 'pending',
-      createdAt: now,
-      updatedAt: now,
-    };
-  }
-
-  return createdDebt;
+  return {
+    id: debtId,
+    personName: payload.personName,
+    phone: payload.phone,
+    type: payload.type,
+    amount,
+    remainingAmount: amount,
+    note: payload.note,
+    dueDate: payload.dueDate,
+    status: 'pending',
+    createdAt: now,
+    updatedAt: now,
+  };
 }
 
 export async function updateLocalDebt(
@@ -508,10 +488,11 @@ export async function updateLocalDebt(
     ? Number(payload.remainingAmount)
     : amount;
   const status = payload.status || (remaining <= 0 ? 'settled' : remaining < amount ? 'partially_paid' : 'pending');
+  const numId = Number(id) || 0;
 
   await db.executeSql(
     `UPDATE debts SET person_name = ?, phone = ?, type = ?, amount = ?, remaining_amount = ?, note = ?, due_date = ?, status = ?, updated_at = ?
-     WHERE id = ?`,
+     WHERE id = ? OR rowid = ?`,
     [
       payload.personName,
       payload.phone || null,
@@ -523,17 +504,9 @@ export async function updateLocalDebt(
       status,
       now,
       id,
+      numId,
     ],
   );
-
-  try {
-    const [rowResult] = await db.executeSql('SELECT * FROM debts WHERE id = ?', [id]);
-    if (rowResult && rowResult.rows.length > 0) {
-      return toDebt(rowResult.rows.item(0));
-    }
-  } catch {
-    // fallback below
-  }
 
   return {
     id,
@@ -552,8 +525,21 @@ export async function updateLocalDebt(
 
 export async function deleteLocalDebt(id: string): Promise<void> {
   const db = await getDb();
-  await db.executeSql('DELETE FROM debt_transactions WHERE debt_id = ?', [id]);
-  await db.executeSql('DELETE FROM debts WHERE id = ?', [id]);
+  const numId = Number(id) || 0;
+  await db.executeSql(
+    'DELETE FROM debt_transactions WHERE debt_id = ? OR debt_id = ?',
+    [id, numId],
+  );
+  try {
+    await db.executeSql(
+      'DELETE FROM debt_payments WHERE debt_id = ? OR debt_id = ?',
+      [id, numId],
+    );
+  } catch {}
+  await db.executeSql(
+    'DELETE FROM debts WHERE id = ? OR rowid = ?',
+    [id, numId],
+  );
 }
 
 export async function addDebtRepayment(
@@ -575,7 +561,11 @@ export async function addDebtRepayment(
     );`,
   );
 
-  const [debtResult] = await db.executeSql('SELECT * FROM debts WHERE id = ?', [debtId]);
+  const numId = Number(debtId) || 0;
+  const [debtResult] = await db.executeSql(
+    'SELECT rowid, * FROM debts WHERE id = ? OR rowid = ?',
+    [debtId, numId],
+  );
   if (!debtResult || !debtResult.rows.length) {
     throw new Error('Debt record not found');
   }
@@ -585,7 +575,7 @@ export async function addDebtRepayment(
 
   const txResult = await db.executeSql(
     'INSERT INTO debt_transactions (debt_id, amount, note, type, created_at) VALUES (?, ?, ?, ?, ?)',
-    [debtId, payAmount, note || null, 'repayment', now],
+    [currentDebt.id, payAmount, note || null, 'repayment', now],
   );
 
   let txInsertId = txResult && txResult[0] ? txResult[0].insertId : undefined;
@@ -602,8 +592,8 @@ export async function addDebtRepayment(
   const nextStatus: DebtStatus = nextRemaining <= 0 ? 'settled' : 'partially_paid';
 
   await db.executeSql(
-    'UPDATE debts SET remaining_amount = ?, status = ?, updated_at = ? WHERE id = ?',
-    [nextRemaining, nextStatus, now, debtId],
+    'UPDATE debts SET remaining_amount = ?, status = ?, updated_at = ? WHERE id = ? OR rowid = ?',
+    [nextRemaining, nextStatus, now, currentDebt.id, numId],
   );
 
   let updatedDebt: Debt = {
@@ -614,7 +604,10 @@ export async function addDebtRepayment(
   };
 
   try {
-    const [updatedDebtResult] = await db.executeSql('SELECT * FROM debts WHERE id = ?', [debtId]);
+    const [updatedDebtResult] = await db.executeSql(
+      'SELECT rowid, * FROM debts WHERE id = ? OR rowid = ?',
+      [currentDebt.id, numId],
+    );
     if (updatedDebtResult && updatedDebtResult.rows.length > 0) {
       updatedDebt = toDebt(updatedDebtResult.rows.item(0));
     }
@@ -622,7 +615,7 @@ export async function addDebtRepayment(
 
   let txObj: DebtTransaction = {
     id: String(txInsertId || Date.now()),
-    debtId: String(debtId),
+    debtId: currentDebt.id,
     amount: payAmount,
     note,
     type: 'repayment',
@@ -662,7 +655,11 @@ export async function addDebtAdditional(
     );`,
   );
 
-  const [debtResult] = await db.executeSql('SELECT * FROM debts WHERE id = ?', [debtId]);
+  const numId = Number(debtId) || 0;
+  const [debtResult] = await db.executeSql(
+    'SELECT rowid, * FROM debts WHERE id = ? OR rowid = ?',
+    [debtId, numId],
+  );
   if (!debtResult || !debtResult.rows.length) {
     throw new Error('Debt record not found');
   }
@@ -672,7 +669,7 @@ export async function addDebtAdditional(
 
   const txResult = await db.executeSql(
     'INSERT INTO debt_transactions (debt_id, amount, note, type, created_at) VALUES (?, ?, ?, ?, ?)',
-    [debtId, addAmount, note || null, 'additional', now],
+    [currentDebt.id, addAmount, note || null, 'additional', now],
   );
 
   let txInsertId = txResult && txResult[0] ? txResult[0].insertId : undefined;
@@ -690,8 +687,8 @@ export async function addDebtAdditional(
   const nextStatus: DebtStatus = 'pending';
 
   await db.executeSql(
-    'UPDATE debts SET amount = ?, remaining_amount = ?, status = ?, updated_at = ? WHERE id = ?',
-    [nextAmount, nextRemaining, nextStatus, now, debtId],
+    'UPDATE debts SET amount = ?, remaining_amount = ?, status = ?, updated_at = ? WHERE id = ? OR rowid = ?',
+    [nextAmount, nextRemaining, nextStatus, now, currentDebt.id, numId],
   );
 
   let updatedDebt: Debt = {
@@ -703,7 +700,10 @@ export async function addDebtAdditional(
   };
 
   try {
-    const [updatedDebtResult] = await db.executeSql('SELECT * FROM debts WHERE id = ?', [debtId]);
+    const [updatedDebtResult] = await db.executeSql(
+      'SELECT rowid, * FROM debts WHERE id = ? OR rowid = ?',
+      [currentDebt.id, numId],
+    );
     if (updatedDebtResult && updatedDebtResult.rows.length > 0) {
       updatedDebt = toDebt(updatedDebtResult.rows.item(0));
     }
@@ -711,7 +711,7 @@ export async function addDebtAdditional(
 
   let txObj: DebtTransaction = {
     id: String(txInsertId || Date.now()),
-    debtId: String(debtId),
+    debtId: currentDebt.id,
     amount: addAmount,
     note,
     type: 'additional',
@@ -735,11 +735,12 @@ export async function addDebtAdditional(
 
 export async function fetchDebtTransactions(debtId: string): Promise<DebtTransaction[]> {
   const db = await getDb();
+  const numId = Number(debtId) || 0;
   const [result] = await db.executeSql(
-    'SELECT * FROM debt_transactions WHERE debt_id = ? ORDER BY created_at DESC, id DESC',
-    [debtId],
+    'SELECT * FROM debt_transactions WHERE debt_id = ? OR debt_id = ? ORDER BY created_at DESC, id DESC',
+    [debtId, numId],
   );
-  const rows = result.rows;
+  const rows = result ? result.rows : { length: 0 };
   const list: DebtTransaction[] = [];
   for (let i = 0; i < rows.length; i += 1) {
     list.push(toDebtTransaction(rows.item(i)));
@@ -847,10 +848,10 @@ export async function restoreFullBackupData(
         d.remainingAmount ?? d.amount,
         d.note || null,
         d.dueDate || null,
-        d.createdAt || now,
+        d.createdAt || new Date().toISOString(),
         d.status || 'pending',
-        d.createdAt,
-        d.updatedAt || d.createdAt,
+        d.createdAt || new Date().toISOString(),
+        d.updatedAt || d.createdAt || new Date().toISOString(),
       ],
     );
   }

@@ -77,4 +77,5 @@ yarn-error.log
 
 # Screenshots and temp files in root
 /*.png
+*.db
 .bundle/

@@ -169,12 +169,12 @@ export function calculateFinancialHealth(
 
   // 3. Khata / Debt exposure
   const totalPendingToPay = debts
-    .filter(d => d.type === 'payable' || (d as any).type === 'debt')
-    .reduce((sum, d) => sum + Math.max(0, (Number(d.amount) || 0) - (Number(d.paidAmount) || 0)), 0);
+    .filter(d => d.type === 'borrowed' || (d as any).type === 'payable' || (d as any).type === 'debt')
+    .reduce((sum, d) => sum + (d.remainingAmount !== undefined ? Number(d.remainingAmount) : Math.max(0, (Number(d.amount) || 0) - (Number((d as any).paidAmount) || 0))), 0);
 
   const totalPendingToReceive = debts
-    .filter(d => d.type === 'receivable' || (d as any).type === 'credit')
-    .reduce((sum, d) => sum + Math.max(0, (Number(d.amount) || 0) - (Number(d.paidAmount) || 0)), 0);
+    .filter(d => d.type === 'lent' || (d as any).type === 'receivable' || (d as any).type === 'credit')
+    .reduce((sum, d) => sum + (d.remainingAmount !== undefined ? Number(d.remainingAmount) : Math.max(0, (Number(d.amount) || 0) - (Number((d as any).paidAmount) || 0))), 0);
 
   const debtExposure = totalLiquidBalance > 0
     ? Math.round((totalPendingToPay / totalLiquidBalance) * 100)
@@ -514,12 +514,12 @@ export function queryFinancialAI(
 
   // Khata stats
   const totalReceivable = debts
-    .filter(d => d.type === 'receivable' || (d as any).type === 'credit')
-    .reduce((s, d) => s + Math.max(0, (Number(d.amount) || 0) - (Number(d.paidAmount) || 0)), 0);
+    .filter(d => d.type === 'lent' || (d as any).type === 'receivable' || (d as any).type === 'credit')
+    .reduce((s, d) => s + (d.remainingAmount !== undefined ? Number(d.remainingAmount) : Math.max(0, (Number(d.amount) || 0) - (Number((d as any).paidAmount) || 0))), 0);
 
   const totalPayable = debts
-    .filter(d => d.type === 'payable' || (d as any).type === 'debt')
-    .reduce((s, d) => s + Math.max(0, (Number(d.amount) || 0) - (Number(d.paidAmount) || 0)), 0);
+    .filter(d => d.type === 'borrowed' || (d as any).type === 'payable' || (d as any).type === 'debt')
+    .reduce((s, d) => s + (d.remainingAmount !== undefined ? Number(d.remainingAmount) : Math.max(0, (Number(d.amount) || 0) - (Number((d as any).paidAmount) || 0))), 0);
 
   // Affordability query check: "can i afford 500", "afford 100", etc.
   const affordMatch = q.match(/afford\s*(?:a|an)?\s*(?:rs\.?|pkr|usd|\$|€|£)?\s*([0-9,]+)/i);

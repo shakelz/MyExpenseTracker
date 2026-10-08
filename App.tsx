@@ -334,8 +334,14 @@ function AppContent() {
   };
 
   const handleDeleteDebt = async (debtId: string) => {
-    await deleteLocalDebt(debtId);
-    setDebts(current => current.filter(d => d.id !== debtId));
+    try {
+      await deleteLocalDebt(debtId);
+      const updated = await fetchLocalDebts();
+      setDebts(updated);
+    } catch (err) {
+      console.warn('Failed to delete debt:', err);
+      setDebts(current => current.filter(d => d.id !== debtId));
+    }
   };
 
   const handleFetchDebtTransactions = async (debtId: string) => {

@@ -335,9 +335,13 @@ export default function LoansScreen({
           text: 'Delete',
           style: 'destructive',
           onPress: async () => {
-            await onDeleteDebt(debt.id);
-            if (isHistoryModalOpen) {
-              setHistoryModalOpen(false);
+            try {
+              await onDeleteDebt(debt.id);
+              if (isHistoryModalOpen) {
+                setHistoryModalOpen(false);
+              }
+            } catch (err: any) {
+              Alert.alert('Error', `Failed to delete record: ${err?.message || 'Unknown error'}`);
             }
           },
         },
@@ -539,18 +543,6 @@ export default function LoansScreen({
             </View>
           </View>
         }
-        ListEmptyComponent={
-          <View style={styles.emptyState}>
-            <Text style={styles.emptyIcon}>🤝</Text>
-            <Text style={styles.emptyTitle}>No Loan Records Found</Text>
-            <Text style={styles.emptySubtitle}>
-              Tap "+ New" to add your first "Lena Hai" or "Dena Hai" hisaab.
-            </Text>
-            <Pressable style={styles.emptyAddBtn} onPress={handleOpenAdd}>
-              <Text style={styles.emptyAddBtnText}>+ Add Hisaab</Text>
-            </Pressable>
-          </View>
-        }
         renderItem={({ item }) => {
           const isLent = item.type === 'lent';
           const isSettled = item.status === 'settled';
@@ -558,96 +550,101 @@ export default function LoansScreen({
           const paidAmount = item.amount - item.remainingAmount;
 
           return (
-            <Pressable style={styles.personCard} onPress={() => handleOpenHistory(item)}>
-              <View style={styles.personTopRow}>
-                {/* Avatar initial with color badge */}
-                <View
-                  style={[
-                    styles.avatarBadge,
-                    { borderColor: isSettled ? '#6B7280' : isLent ? '#10B981' : '#EF4444' },
-                  ]}
-                >
-                  <Text style={styles.avatarText}>
-                    {item.personName ? item.personName.charAt(0).toUpperCase() : '?'}
-                  </Text>
-                </View>
-
-                {/* Name & Note */}
-                <View style={styles.personMainInfo}>
-                  <View style={styles.personTitleRow}>
-                    <Text style={styles.personNameText}>{item.personName}</Text>
-                    {isSettled ? (
-                      <View style={styles.settledBadge}>
-                        <Text style={styles.settledBadgeText}>✓ Settled</Text>
-                      </View>
-                    ) : (
-                      <View
-                        style={[
-                          styles.typeBadge,
-                          {
-                            backgroundColor: isLent
-                              ? 'rgba(16, 185, 129, 0.15)'
-                              : 'rgba(239, 68, 68, 0.15)',
-                          },
-                        ]}
-                      >
-                        <Text
-                          style={[
-                            styles.typeBadgeText,
-                            { color: isLent ? '#34D399' : '#F87171' },
-                          ]}
-                        >
-                          {isLent ? 'Lena Hai' : 'Dena Hai'}
-                        </Text>
-                      </View>
-                    )}
-                  </View>
-
-                  {item.phone ? <Text style={styles.personPhoneText}>{item.phone}</Text> : null}
-                  {item.note ? <Text style={styles.personNoteText}>{item.note}</Text> : null}
-                  {item.dueDate ? (
-                    <Text style={styles.personDueText}>📅 Due: {item.dueDate}</Text>
-                  ) : null}
-                </View>
-
-                {/* Amount Column */}
-                <View style={styles.personAmountCol}>
-                  <Text
+            <View style={styles.personCard}>
+              <Pressable
+                style={styles.personCardContent}
+                onPress={() => handleOpenHistory(item)}
+              >
+                <View style={styles.personTopRow}>
+                  {/* Avatar initial with color badge */}
+                  <View
                     style={[
-                      styles.personRemainingText,
-                      { color: isSettled ? '#9CA3AF' : isLent ? '#34D399' : '#F87171' },
+                      styles.avatarBadge,
+                      { borderColor: isSettled ? '#6B7280' : isLent ? '#10B981' : '#EF4444' },
                     ]}
                   >
-                    {formatCurrency(item.remainingAmount)}
-                  </Text>
-                  <Text style={styles.personTotalText}>of {formatCurrency(item.amount)}</Text>
-                </View>
-              </View>
+                    <Text style={styles.avatarText}>
+                      {item.personName ? item.personName.charAt(0).toUpperCase() : '?'}
+                    </Text>
+                  </View>
 
-              {/* Progress Bar */}
-              {!isSettled && (
-                <View style={styles.progressContainer}>
-                  <View style={styles.progressBarBackground}>
-                    <View
-                      style={[
-                        styles.progressBarFill,
-                        {
-                          width: `${Math.min(100, Math.max(0, progress * 100))}%`,
-                          backgroundColor: isLent ? '#10B981' : '#EF4444',
-                        },
-                      ]}
-                    />
+                  {/* Name & Note */}
+                  <View style={styles.personMainInfo}>
+                    <View style={styles.personTitleRow}>
+                      <Text style={styles.personNameText}>{item.personName}</Text>
+                      {isSettled ? (
+                        <View style={styles.settledBadge}>
+                          <Text style={styles.settledBadgeText}>✓ Settled</Text>
+                        </View>
+                      ) : (
+                        <View
+                          style={[
+                            styles.typeBadge,
+                            {
+                              backgroundColor: isLent
+                                ? 'rgba(16, 185, 129, 0.15)'
+                                : 'rgba(239, 68, 68, 0.15)',
+                            },
+                          ]}
+                        >
+                          <Text
+                            style={[
+                              styles.typeBadgeText,
+                              { color: isLent ? '#34D399' : '#F87171' },
+                            ]}
+                          >
+                            {isLent ? 'Lena Hai' : 'Dena Hai'}
+                          </Text>
+                        </View>
+                      )}
+                    </View>
+
+                    {item.phone ? <Text style={styles.personPhoneText}>{item.phone}</Text> : null}
+                    {item.note ? <Text style={styles.personNoteText}>{item.note}</Text> : null}
+                    {item.dueDate ? (
+                      <Text style={styles.personDueText}>📅 Due: {item.dueDate}</Text>
+                    ) : null}
                   </View>
-                  <View style={styles.progressLabelRow}>
-                    <Text style={styles.progressLabelText}>
-                      Paid: {formatCurrency(paidAmount)} ({Math.round(progress * 100)}%)
+
+                  {/* Amount Column */}
+                  <View style={styles.personAmountCol}>
+                    <Text
+                      style={[
+                        styles.personRemainingText,
+                        { color: isSettled ? '#9CA3AF' : isLent ? '#34D399' : '#F87171' },
+                      ]}
+                    >
+                      {formatCurrency(item.remainingAmount)}
                     </Text>
-                    <Text style={styles.progressLabelText}>
-                      Remaining: {formatCurrency(item.remainingAmount)}
-                    </Text>
+                    <Text style={styles.personTotalText}>of {formatCurrency(item.amount)}</Text>
                   </View>
                 </View>
-              )}
+
+                {/* Progress Bar */}
+                {!isSettled && (
+                  <View style={styles.progressContainer}>
+                    <View style={styles.progressBarBackground}>
+                      <View
+                        style={[
+                          styles.progressBarFill,
+                          {
+                            width: `${Math.min(100, Math.max(0, progress * 100))}%`,
+                            backgroundColor: isLent ? '#10B981' : '#EF4444',
+                          },
+                        ]}
+                      />
+                    </View>
+                    <View style={styles.progressLabelRow}>
+                      <Text style={styles.progressLabelText}>
+                        Paid: {formatCurrency(paidAmount)} ({Math.round(progress * 100)}%)
+                      </Text>
+                      <Text style={styles.progressLabelText}>
+                        Remaining: {formatCurrency(item.remainingAmount)}
+                      </Text>
+                    </View>
+                  </View>
+                )}
+              </Pressable>
 
               {/* Card Bottom Actions */}
               <View style={styles.cardActionsRow}>
@@ -689,12 +686,13 @@ export default function LoansScreen({
 
                 <Pressable
                   style={styles.actionBtnDelete}
+                  hitSlop={{ top: 12, bottom: 12, left: 12, right: 12 }}
                   onPress={() => handleDelete(item)}
                 >
                   <Text style={styles.actionBtnDeleteText}>🗑</Text>
                 </Pressable>
               </View>
-            </Pressable>
+            </View>
           );
         }}
         ListEmptyComponent={
@@ -1098,6 +1096,21 @@ export default function LoansScreen({
                 }}
               >
                 <Text style={styles.submitModalBtnText}>+ Record New Payment</Text>
+              </Pressable>
+            )}
+
+            {selectedDebt && (
+              <Pressable
+                style={styles.modalDeleteBtn}
+                onPress={() => {
+                  const target = selectedDebt;
+                  setHistoryModalOpen(false);
+                  setTimeout(() => {
+                    handleDelete(target);
+                  }, 200);
+                }}
+              >
+                <Text style={styles.modalDeleteBtnText}>🗑 Delete Entire Loan Record</Text>
               </Pressable>
             )}
           </View>
@@ -1532,10 +1545,37 @@ const styles = StyleSheet.create({
   },
   actionBtnDelete: {
     marginLeft: 'auto',
-    padding: 6,
+    backgroundColor: 'rgba(239, 68, 68, 0.15)',
+    paddingHorizontal: 8,
+    paddingVertical: 5,
+    borderRadius: 8,
+    borderWidth: 1,
+    borderColor: 'rgba(239, 68, 68, 0.3)',
+    alignItems: 'center',
+    justifyContent: 'center',
+    minWidth: 32,
+    minHeight: 28,
   },
   actionBtnDeleteText: {
-    fontSize: 14,
+    fontSize: 13,
+  },
+  personCardContent: {
+    paddingBottom: 2,
+  },
+  modalDeleteBtn: {
+    marginTop: 10,
+    paddingVertical: 10,
+    alignItems: 'center',
+    justifyContent: 'center',
+    borderRadius: 12,
+    backgroundColor: 'rgba(239, 68, 68, 0.12)',
+    borderWidth: 1,
+    borderColor: 'rgba(239, 68, 68, 0.25)',
+  },
+  modalDeleteBtnText: {
+    color: '#EF4444',
+    fontSize: 13,
+    fontWeight: '700',
   },
   emptyState: {
     alignItems: 'center',
