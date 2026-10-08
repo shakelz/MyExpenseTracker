@@ -27,8 +27,8 @@ class BankNotificationListenerService : NotificationListenerService() {
     private const val PREFS_KEY_SEEN = "processed_notification_ids"
     private const val PREFS_KEY_RECENT_TXS = "recent_processed_transactions_v2"
 
-    // Deduplication window: 180 seconds (3 minutes)
-    private const val DEDUP_WINDOW_MS = 180_000L
+    // Deduplication window: 12 hours (prevents multi-stage transfer status duplicates from Wise/Banks)
+    private const val DEDUP_WINDOW_MS = 12 * 60 * 60 * 1000L
 
     // Callback listener for React Native module
     var onTransactionAddedListener: ((JSONObject) -> Unit)? = null
@@ -166,6 +166,37 @@ class BankNotificationListenerService : NotificationListenerService() {
         pkg.contains("discord")
     ) return true
 
+    // News & Media Apps
+    if (pkg.contains("news") ||
+        pkg.contains("magazines") ||
+        pkg.contains("daily") ||
+        pkg.contains("dawn") ||
+        pkg.contains("tribune") ||
+        pkg.contains("geo") ||
+        pkg.contains("ary") ||
+        pkg.contains("bbc") ||
+        pkg.contains("cnn") ||
+        pkg.contains("inshorts")
+    ) return true
+
+    // Food delivery & Ride tracking (status updates like 'rider 5 mins away' - not financial alerts)
+    if (pkg.contains("foodpanda") ||
+        pkg.contains("careem") ||
+        pkg.contains("uber") ||
+        pkg.contains("indrive") ||
+        pkg.contains("zomato") ||
+        pkg.contains("swiggy") ||
+        pkg.contains("deliveroo") ||
+        pkg.contains("talabat")
+    ) return true
+
+    // Telecom self-care apps promo alerts
+    if (pkg == "com.jazz.world" ||
+        pkg == "com.telenor.pakistan.mytelenor" ||
+        pkg == "com.zong.myzong" ||
+        pkg == "com.ufone.selfcare"
+    ) return true
+
     // Media & Browsers
     if (pkg.contains("chrome") ||
         pkg.contains("firefox") ||
@@ -259,18 +290,46 @@ class BankNotificationListenerService : NotificationListenerService() {
   ): JSONObject? {
     val lowerContent = content.lowercase(Locale.ROOT)
 
-    // 1. Filter out OTPs and authentication alerts
+    // 1. STRICT Filter: OTPs, Security Codes, and Auth alerts (NEVER record OTPs as transactions)
     if (lowerContent.contains("otp") ||
         lowerContent.contains("verification code") ||
         lowerContent.contains("one time password") ||
+        lowerContent.contains("do not share") ||
+        lowerContent.contains("never share") ||
+        lowerContent.contains("secret code") ||
+        lowerContent.contains("security code") ||
         lowerContent.contains("login alert") ||
         lowerContent.contains("logged in") ||
-        lowerContent.contains("security code") ||
-        lowerContent.contains("device registered")
+        lowerContent.contains("authorization code") ||
+        lowerContent.contains("device registered") ||
+        lowerContent.contains("passcode") ||
+        lowerContent.contains("auth code")
     ) {
-      if (!lowerContent.contains("debited") && !lowerContent.contains("credited") && !lowerContent.contains("transferred")) {
+      Log.d(TAG, "Rejected OTP or security authentication notification: $content")
+      return null
+    }
+
+    // 1b. Reject balance inquiry alerts (e.g. 'Your balance is Rs 50.00' without debit/credit)
+    if (lowerContent.contains("your balance is") ||
+        lowerContent.contains("remaining balance is") ||
+        lowerContent.contains("current balance is") ||
+        lowerContent.contains("balance inquiry") ||
+        lowerContent.contains("mini statement")
+    ) {
+      if (!lowerContent.contains("debited") && !lowerContent.contains("credited") && !lowerContent.contains("spent") && !lowerContent.contains("received")) {
         return null
       }
+    }
+
+    // 1c. Reject telecom advance loan and bundle activation alerts
+    if (lowerContent.contains("advance loan") ||
+        lowerContent.contains("super card") ||
+        lowerContent.contains("bundle subscribed") ||
+        lowerContent.contains("package subscribed") ||
+        lowerContent.contains("mbs remaining") ||
+        lowerContent.contains("free mins")
+    ) {
+      return null
     }
 
     // 2. Strict Promotional & Spam Filter (e.g. Temu offers, flash sales, coupon vouchers)
@@ -428,7 +487,9 @@ class BankNotificationListenerService : NotificationListenerService() {
       "limited time offer", "win up to", "stand a chance", "congratulations you won",
       "reward points", "free delivery", "free shipping", "spin the wheel", "cashback offer",
       "pre-approved loan", "apply now", "click here to claim", "claim now", "save up to",
-      "gift card", "gift voucher", "earn cashback", "exclusive deal", "deal of the day"
+      "gift card", "gift voucher", "earn cashback", "exclusive deal", "deal of the day",
+      "congratulations", "lucky draw", "bumper prize", "scratch card", "invest in",
+      "credit limit upgrade", "upgrade your card", "subscribe now"
     )
 
     for (promo in promoKeywords) {
@@ -436,7 +497,7 @@ class BankNotificationListenerService : NotificationListenerService() {
         // Only allow if it's an explicit debit/credit confirmation (e.g. "cashback of Rs 50 credited")
         val isExplicitLedger = (text.contains("has been debited") || text.contains("has been credited") ||
                                text.contains("was debited") || text.contains("was credited") ||
-                               text.contains("a/c") || text.contains("acct"))
+                               text.contains("a/c ending") || text.contains("acct ending"))
         if (!isExplicitLedger) {
           return true
         }
@@ -489,7 +550,8 @@ class BankNotificationListenerService : NotificationListenerService() {
 
   private fun extractReferenceId(text: String): String? {
     val patterns = listOf(
-      Pattern.compile("(?i)(?:trx\\s*id|txn\\s*id|transaction\\s*id|ref(?:erence)?\\s*(?:no|id)?|utr|rrn|stan)[:\\s#]+([A-Za-z0-9]{5,25})"),
+      Pattern.compile("(?i)(?:transfer\\s*(?:id|#|no|number)|trx\\s*id|txn\\s*id|transaction\\s*id|ref(?:erence)?\\s*(?:no|id)?|utr|rrn|stan)[:\\s#]+([A-Za-z0-9_-]{5,30})"),
+      Pattern.compile("(?i)\\b(?:transfer\\s*#?\\s*|txn\\s*#?\\s*)([0-9]{6,20})\\b"),
       Pattern.compile("(?i)(?:id|no)[:\\s#]+([0-9]{8,20})")
     )
     for (p in patterns) {
@@ -815,15 +877,34 @@ class BankNotificationListenerService : NotificationListenerService() {
 
   private fun isValidPartyName(name: String, bankName: String): Boolean {
     val lower = name.lowercase(Locale.ROOT).trim()
-    if (lower.length < 2 || lower.length > 40) return false
+    if (lower.length < 2 || lower.length > 35) return false
+
+    // Reject conversational sentences, verbs, punctuation, and news/status text
+    if (lower.contains("!") || lower.contains("?") || lower.contains(".") ||
+        lower.contains("was") || lower.contains("fast") || lower.contains("your") ||
+        lower.contains("on its way") || lower.contains("arrived") || lower.contains("news") ||
+        lower.contains("thank") || lower.contains("please") || lower.contains("sent") ||
+        lower.contains("team") || lower.contains("support") || lower.contains("update") ||
+        lower.contains("status") || lower.contains("notice") || lower.contains("alert")
+    ) {
+      return false
+    }
+
     val invalidWords = listOf(
       "your", "account", "a/c", "acct", "wallet", "card", "bank", "details", "payment",
       "received", "transaction", "trx", "txn", "ref", "amount", "rs", "pkr", "eur",
       "usd", "inr", "balance", "available", "debited", "credited", "spent", "paid",
-      "transfer", "success", "successful", "completed", "alert", "notification", "messages"
+      "transfer", "success", "successful", "completed", "alert", "notification", "messages",
+      "scopex", "wise", "transferwise"
     )
     if (invalidWords.contains(lower)) return false
     if (lower == bankName.lowercase(Locale.ROOT)) return false
+
+    // Sentence detection (more than 4 words or containing common stop words)
+    val words = lower.split(Regex("\\s+"))
+    if (words.size > 4) return false
+    val stopWords = setOf("is", "are", "the", "a", "an", "for", "to", "from", "in", "on", "at", "by", "with", "has", "have", "had", "been")
+    if (words.any { it in stopWords }) return false
 
     // If it's a phone number or account number (digits), it's VALID!
     if (name.all { it.isDigit() || it == '+' || it == ' ' || it == '-' }) {
@@ -859,7 +940,6 @@ class BankNotificationListenerService : NotificationListenerService() {
       val itemType = item.optString("type", "")
       val itemRefId = item.optString("refId", "")
       val itemAccount = item.optString("account", "")
-      val itemNote = item.optString("note", "")
 
       // 1. Exact amount and same type check
       val amountMatch = Math.abs(itemAmount - amount) < 0.01
@@ -868,7 +948,9 @@ class BankNotificationListenerService : NotificationListenerService() {
       if (amountMatch && typeMatch) {
         // If reference ID exists on both and matches -> Definite duplicate
         if (refId.isNotBlank() && itemRefId.isNotBlank()) {
-          return refId.equals(itemRefId, ignoreCase = true)
+          if (refId.equals(itemRefId, ignoreCase = true)) {
+            return true
+          }
         }
 
         // If reference IDs are different non-empty strings -> Definitely separate transactions!
@@ -876,21 +958,21 @@ class BankNotificationListenerService : NotificationListenerService() {
           continue
         }
 
-        // If notes are clearly different non-empty strings -> Definitely separate transactions!
-        if (refId.isBlank() && itemRefId.isBlank() && note.isNotBlank() && itemNote.isNotBlank() &&
-            !note.equals(itemNote, ignoreCase = true)) {
-          continue
-        }
-
         val timeDiff = Math.abs(currentTime - itemTime)
 
-        // Simultaneous alerts from the same bank / wallet within 30 seconds
-        if (itemAccount.equals(accountName, ignoreCase = true) && timeDiff < 30_000L) {
+        // Same account/bank or generic bank account with identical amount within 12 hours:
+        // Status updates (e.g. Wise "Sent" -> "Verifying" -> "On its way" -> "Completed")
+        // occur within minutes to hours. We MUST suppress them!
+        val isSameOrGenericAccount = itemAccount.equals(accountName, ignoreCase = true) ||
+            itemAccount == "Bank Account" || accountName == "Bank Account" ||
+            itemAccount.contains("Wise", true) || accountName.contains("Wise", true)
+
+        if (isSameOrGenericAccount && timeDiff < DEDUP_WINDOW_MS) {
           return true
         }
 
-        // Cross-app alert (e.g. Bank App + SMS) within 60 seconds
-        if ((itemAccount == "Bank Account" || accountName == "Bank Account" || itemAccount.equals(accountName, ignoreCase = true)) && timeDiff < 60_000L) {
+        // Cross-bank alert within 5 minutes with identical amount -> Duplicate
+        if (timeDiff < 300_000L) {
           return true
         }
       }

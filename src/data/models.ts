@@ -19,6 +19,7 @@ export type QuickTransaction = {
   accountName?: string;
   accountType?: AccountType;
   category?: string;
+  refId?: string;
 };
 
 export type DebtType = 'lent' | 'borrowed'; // lent = Lena Hai, borrowed = Dena Hai

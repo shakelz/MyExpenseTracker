@@ -50,6 +50,7 @@ import {
   subscribeToBankNotifications,
 } from './src/platform/bankNotificationService';
 import {
+  addDebtAdditional,
   addDebtRepayment,
   createLocalAccount,
   createLocalDebt,
@@ -322,6 +323,12 @@ function AppContent() {
 
   const handleAddRepayment = async (debtId: string, amount: number, note?: string) => {
     await addDebtRepayment(debtId, amount, note);
+    const updated = await fetchLocalDebts();
+    setDebts(updated);
+  };
+
+  const handleAddDebtAdditional = async (debtId: string, amount: number, note?: string) => {
+    await addDebtAdditional(debtId, amount, note);
     const updated = await fetchLocalDebts();
     setDebts(updated);
   };
@@ -730,6 +737,7 @@ function AppContent() {
           currencySymbol={currencySymbol}
           onAddDebt={handleAddDebt}
           onAddRepayment={handleAddRepayment}
+          onAddDebtAdditional={handleAddDebtAdditional}
           onDeleteDebt={handleDeleteDebt}
           onFetchTransactions={handleFetchDebtTransactions}
         />

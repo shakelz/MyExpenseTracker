@@ -1,10 +1,13 @@
-import React, { useMemo, useState } from 'react';
+import React, { useEffect, useMemo, useState } from 'react';
 import {
   Alert,
+  BackHandler,
   FlatList,
   Keyboard,
+  KeyboardAvoidingView,
   Linking,
   Modal,
+  Platform,
   Pressable,
   ScrollView,
   StyleSheet,
@@ -28,6 +31,7 @@ type LoansScreenProps = {
     dueDate?: string;
   }) => Promise<void>;
   onAddRepayment: (debtId: string, amount: number, note?: string) => Promise<void>;
+  onAddDebtAdditional?: (debtId: string, amount: number, note?: string) => Promise<void>;
   onDeleteDebt: (debtId: string) => Promise<void>;
   onRefreshDebts?: () => Promise<void>;
   onFetchTransactions: (debtId: string) => Promise<DebtTransaction[]>;
@@ -39,6 +43,7 @@ export default function LoansScreen({
   currencySymbol,
   onAddDebt,
   onAddRepayment,
+  onAddDebtAdditional,
   onDeleteDebt,
   onFetchTransactions,
 }: LoansScreenProps) {
@@ -52,6 +57,9 @@ export default function LoansScreen({
   const [isAddModalOpen, setAddModalOpen] = useState(false);
   const [isPaymentModalOpen, setPaymentModalOpen] = useState(false);
   const [isHistoryModalOpen, setHistoryModalOpen] = useState(false);
+
+  const [isKeyboardVisible, setKeyboardVisible] = useState(false);
+  const [paymentActionType, setPaymentActionType] = useState<'repayment' | 'additional'>('repayment');
 
   const [selectedDebt, setSelectedDebt] = useState<Debt | null>(null);
   const [historyTransactions, setHistoryTransactions] = useState<DebtTransaction[]>([]);
@@ -68,6 +76,45 @@ export default function LoansScreen({
   // Payment Form State
   const [paymentAmount, setPaymentAmount] = useState('');
   const [paymentNote, setPaymentNote] = useState('');
+
+  useEffect(() => {
+    const showSub = Keyboard.addListener(
+      Platform.OS === 'ios' ? 'keyboardWillShow' : 'keyboardDidShow',
+      () => setKeyboardVisible(true),
+    );
+    const hideSub = Keyboard.addListener(
+      Platform.OS === 'ios' ? 'keyboardWillHide' : 'keyboardDidHide',
+      () => setKeyboardVisible(false),
+    );
+    return () => {
+      showSub.remove();
+      hideSub.remove();
+    };
+  }, []);
+
+  useEffect(() => {
+    const onBackPress = () => {
+      if (isKeyboardVisible) {
+        Keyboard.dismiss();
+        return true;
+      }
+      if (isAddModalOpen) {
+        setAddModalOpen(false);
+        return true;
+      }
+      if (isPaymentModalOpen) {
+        setPaymentModalOpen(false);
+        return true;
+      }
+      if (isHistoryModalOpen) {
+        setHistoryModalOpen(false);
+        return true;
+      }
+      return false;
+    };
+    const sub = BackHandler.addEventListener('hardwareBackPress', onBackPress);
+    return () => sub.remove();
+  }, [isKeyboardVisible, isAddModalOpen, isPaymentModalOpen, isHistoryModalOpen]);
 
   const formatCurrency = (value: number) =>
     `${currencySymbol}${Math.abs(value).toLocaleString('en-US', {
@@ -150,7 +197,7 @@ export default function LoansScreen({
 
   const handleSubmitAdd = async () => {
     Keyboard.dismiss();
-    const cleanAmount = (amount || '').replace(/,/g, '.').trim();
+    const cleanAmount = (amount || '').replace(/[^0-9.]/g, '').trim();
     const numAmount = parseFloat(cleanAmount);
     if (!personName.trim()) {
       Alert.alert('Required', 'Please enter a person name');
@@ -178,8 +225,9 @@ export default function LoansScreen({
     }
   };
 
-  const handleOpenPayment = (debt: Debt) => {
+  const handleOpenPayment = (debt: Debt, mode: 'repayment' | 'additional' = 'repayment') => {
     setSelectedDebt(debt);
+    setPaymentActionType(mode);
     setPaymentAmount('');
     setPaymentNote('');
     setPaymentModalOpen(true);
@@ -188,12 +236,29 @@ export default function LoansScreen({
   const handleSubmitPayment = async () => {
     if (!selectedDebt) return;
     Keyboard.dismiss();
-    const cleanAmount = (paymentAmount || '').replace(/,/g, '.').trim();
+    const cleanAmount = (paymentAmount || '').replace(/[^0-9.]/g, '').trim();
     const numAmount = parseFloat(cleanAmount);
     if (isNaN(numAmount) || numAmount <= 0) {
-      Alert.alert('Required', 'Please enter a valid payment amount');
+      Alert.alert('Required', 'Please enter a valid amount');
       return;
     }
+
+    if (paymentActionType === 'additional') {
+      try {
+        if (onAddDebtAdditional) {
+          await onAddDebtAdditional(selectedDebt.id, numAmount, paymentNote.trim() || undefined);
+        }
+        setPaymentModalOpen(false);
+        const actionLabel = selectedDebt.type === 'lent' ? 'Diye Aur (Lent More)' : 'Liye Aur (Borrowed More)';
+        Alert.alert('Record Added', `Successfully added ${formatCurrency(numAmount)} (${actionLabel}) for ${selectedDebt.personName}.`);
+      } catch (err: any) {
+        console.error('Failed to record additional loan entry:', err);
+        Alert.alert('Error', `Failed to record entry: ${err?.message || 'Unknown error'}`);
+      }
+      return;
+    }
+
+    // Repayment flow
     if (numAmount > selectedDebt.remainingAmount) {
       Alert.alert(
         'Warning',
@@ -589,10 +654,21 @@ export default function LoansScreen({
                 {!isSettled && (
                   <Pressable
                     style={styles.actionBtnPrimary}
-                    onPress={() => handleOpenPayment(item)}
+                    onPress={() => handleOpenPayment(item, 'repayment')}
                   >
                     <Text style={styles.actionBtnPrimaryText}>
                       + {isLent ? 'Vasooli' : 'Payment'}
+                    </Text>
+                  </Pressable>
+                )}
+
+                {!isSettled && (
+                  <Pressable
+                    style={styles.actionBtnAdditional}
+                    onPress={() => handleOpenPayment(item, 'additional')}
+                  >
+                    <Text style={styles.actionBtnAdditionalText}>
+                      + {isLent ? 'Diye Aur' : 'Liye Aur'}
                     </Text>
                   </Pressable>
                 )}
@@ -621,28 +697,59 @@ export default function LoansScreen({
             </Pressable>
           );
         }}
+        ListEmptyComponent={
+          <View style={styles.emptyState}>
+            <Text style={styles.emptyIcon}>🤝</Text>
+            <Text style={styles.emptyTitle}>
+              {searchQuery ? 'No Hisaab Found' : 'No Loans or Hisaab Yet'}
+            </Text>
+            <Text style={styles.emptySubtitle}>
+              {searchQuery
+                ? `No entry matching "${searchQuery}".`
+                : 'Track udhar, borrowed money, and repayments effortlessly.'}
+            </Text>
+            {!searchQuery && (
+              <Pressable style={styles.emptyAddBtn} onPress={handleOpenAdd}>
+                <Text style={styles.emptyAddBtnText}>+ Add First Loan</Text>
+              </Pressable>
+            )}
+          </View>
+        }
       />
+
+      {/* Floating Action Button (FAB) */}
+      <Pressable style={styles.fabBtn} onPress={handleOpenAdd}>
+        <Text style={styles.fabBtnIcon}>+</Text>
+        <Text style={styles.fabBtnText}>New</Text>
+      </Pressable>
 
       {/* MODAL 1: Add New Loan / Hisaab */}
       <Modal
         visible={isAddModalOpen}
         animationType="slide"
         transparent
-        onRequestClose={() => setAddModalOpen(false)}
+        onRequestClose={() => {
+          if (!isKeyboardVisible) {
+            setAddModalOpen(false);
+          }
+        }}
       >
-        <View style={styles.modalOverlay}>
+        <KeyboardAvoidingView
+          behavior={Platform.OS === 'ios' ? 'padding' : undefined}
+          style={styles.modalOverlay}
+        >
           <View style={styles.modalCard}>
             <View style={styles.modalHeader}>
               <Text style={styles.modalTitle}>Add Loan / Hisaab</Text>
-              <Pressable onPress={() => setAddModalOpen(false)}>
+              <Pressable onPress={() => setAddModalOpen(false)} hitSlop={12}>
                 <Text style={styles.modalCloseText}>✕</Text>
               </Pressable>
             </View>
 
             <ScrollView
               showsVerticalScrollIndicator={false}
-              keyboardShouldPersistTaps="handled"
-              contentContainerStyle={{ paddingBottom: 60 }}
+              keyboardShouldPersistTaps="always"
+              contentContainerStyle={{ paddingBottom: 24 }}
             >
               {/* Type Switcher */}
               <View style={styles.modalTypeRow}>
@@ -689,6 +796,7 @@ export default function LoansScreen({
                 placeholderTextColor="#6B7280"
                 value={personName}
                 onChangeText={setPersonName}
+                autoFocus
               />
 
               {/* Amount */}
@@ -697,7 +805,7 @@ export default function LoansScreen({
                 style={styles.textInput}
                 placeholder="0.00"
                 placeholderTextColor="#6B7280"
-                keyboardType="numeric"
+                keyboardType="decimal-pad"
                 value={amount}
                 onChangeText={setAmount}
               />
@@ -740,85 +848,156 @@ export default function LoansScreen({
               </Pressable>
             </ScrollView>
           </View>
-        </View>
+        </KeyboardAvoidingView>
       </Modal>
 
-      {/* MODAL 2: Record Repayment / Partial Payment */}
+      {/* MODAL 2: Record Repayment / Additional Loan */}
       <Modal
         visible={isPaymentModalOpen}
-        animationType="fade"
+        animationType="slide"
         transparent
-        onRequestClose={() => setPaymentModalOpen(false)}
+        onRequestClose={() => {
+          if (!isKeyboardVisible) {
+            setPaymentModalOpen(false);
+          }
+        }}
       >
-        <View style={styles.modalOverlay}>
+        <KeyboardAvoidingView
+          behavior={Platform.OS === 'ios' ? 'padding' : undefined}
+          style={styles.modalOverlay}
+        >
           <View style={styles.modalCard}>
             <View style={styles.modalHeader}>
               <Text style={styles.modalTitle}>
-                {selectedDebt?.type === 'lent' ? 'Record Vasooli' : 'Record Payment'}
+                {paymentActionType === 'additional'
+                  ? selectedDebt?.type === 'lent'
+                    ? 'Diye Aur (Lent More)'
+                    : 'Liye Aur (Borrowed More)'
+                  : selectedDebt?.type === 'lent'
+                  ? 'Record Vasooli (Received)'
+                  : 'Record Payment (Returned)'}
               </Text>
-              <Pressable onPress={() => setPaymentModalOpen(false)}>
+              <Pressable onPress={() => setPaymentModalOpen(false)} hitSlop={12}>
                 <Text style={styles.modalCloseText}>✕</Text>
               </Pressable>
             </View>
 
-            {selectedDebt && (
-              <View style={styles.paymentDebtInfo}>
-                <Text style={styles.paymentPersonName}>{selectedDebt.personName}</Text>
-                <Text style={styles.paymentRemainingLabel}>
-                  Remaining: {formatCurrency(selectedDebt.remainingAmount)}
-                </Text>
-              </View>
-            )}
-
-            <Text style={styles.inputLabel}>Payment Amount ({currencySymbol}) *</Text>
-            <TextInput
-              style={styles.textInput}
-              placeholder="0.00"
-              placeholderTextColor="#6B7280"
-              keyboardType="numeric"
-              value={paymentAmount}
-              onChangeText={setPaymentAmount}
-            />
-
-            {/* Quick Amount Buttons */}
-            {selectedDebt && (
-              <View style={styles.quickAmountRow}>
+            <ScrollView
+              showsVerticalScrollIndicator={false}
+              keyboardShouldPersistTaps="always"
+              contentContainerStyle={{ paddingBottom: 24 }}
+            >
+              {/* Mode Switcher */}
+              <View style={styles.modalTypeRow}>
                 <Pressable
-                  style={styles.quickAmountBtn}
-                  onPress={() => setPaymentAmount(String(selectedDebt.remainingAmount))}
+                  style={[
+                    styles.modalTypeBtn,
+                    paymentActionType === 'repayment' && styles.modalTypeBtnLentActive,
+                  ]}
+                  onPress={() => setPaymentActionType('repayment')}
                 >
-                  <Text style={styles.quickAmountBtnText}>
-                    Full ({formatCurrency(selectedDebt.remainingAmount)})
+                  <Text
+                    style={[
+                      styles.modalTypeBtnText,
+                      paymentActionType === 'repayment' && styles.modalTypeBtnTextActive,
+                    ]}
+                  >
+                    {selectedDebt?.type === 'lent' ? 'Vasooli / Received' : 'Pay Back / Return'}
                   </Text>
                 </Pressable>
 
-                {selectedDebt.remainingAmount > 100 && (
+                <Pressable
+                  style={[
+                    styles.modalTypeBtn,
+                    paymentActionType === 'additional' && styles.modalTypeBtnBorrowedActive,
+                  ]}
+                  onPress={() => setPaymentActionType('additional')}
+                >
+                  <Text
+                    style={[
+                      styles.modalTypeBtnText,
+                      paymentActionType === 'additional' && styles.modalTypeBtnTextActive,
+                    ]}
+                  >
+                    {selectedDebt?.type === 'lent' ? '+ Diye Aur (Lent More)' : '+ Liye Aur (Borrow More)'}
+                  </Text>
+                </Pressable>
+              </View>
+
+              {selectedDebt && (
+                <View style={styles.paymentDebtInfo}>
+                  <Text style={styles.paymentPersonName}>{selectedDebt.personName}</Text>
+                  <Text style={styles.paymentRemainingLabel}>
+                    Current Remaining: {formatCurrency(selectedDebt.remainingAmount)}
+                  </Text>
+                </View>
+              )}
+
+              <Text style={styles.inputLabel}>
+                {paymentActionType === 'additional' ? 'Additional Amount' : 'Payment Amount'} ({currencySymbol}) *
+              </Text>
+              <TextInput
+                style={styles.textInput}
+                placeholder="0.00"
+                placeholderTextColor="#6B7280"
+                keyboardType="decimal-pad"
+                value={paymentAmount}
+                onChangeText={setPaymentAmount}
+                autoFocus
+              />
+
+              {/* Quick Amount Buttons for Repayment */}
+              {selectedDebt && paymentActionType === 'repayment' && (
+                <View style={styles.quickAmountRow}>
                   <Pressable
                     style={styles.quickAmountBtn}
-                    onPress={() => setPaymentAmount(String(Math.round(selectedDebt.remainingAmount / 2)))}
+                    onPress={() => setPaymentAmount(String(selectedDebt.remainingAmount))}
                   >
                     <Text style={styles.quickAmountBtnText}>
-                      Half ({formatCurrency(Math.round(selectedDebt.remainingAmount / 2))})
+                      Full ({formatCurrency(selectedDebt.remainingAmount)})
                     </Text>
                   </Pressable>
-                )}
-              </View>
-            )}
 
-            <Text style={styles.inputLabel}>Payment Note</Text>
-            <TextInput
-              style={styles.textInput}
-              placeholder="e.g. Received via Easypaisa / Cash"
-              placeholderTextColor="#6B7280"
-              value={paymentNote}
-              onChangeText={setPaymentNote}
-            />
+                  {selectedDebt.remainingAmount > 100 && (
+                    <Pressable
+                      style={styles.quickAmountBtn}
+                      onPress={() => setPaymentAmount(String(Math.round(selectedDebt.remainingAmount / 2)))}
+                    >
+                      <Text style={styles.quickAmountBtnText}>
+                        Half ({formatCurrency(Math.round(selectedDebt.remainingAmount / 2))})
+                      </Text>
+                    </Pressable>
+                  )}
+                </View>
+              )}
 
-            <Pressable style={styles.submitModalBtn} onPress={handleSubmitPayment}>
-              <Text style={styles.submitModalBtnText}>Confirm Payment</Text>
-            </Pressable>
+              <Text style={styles.inputLabel}>
+                {paymentActionType === 'additional' ? 'Note / Reason' : 'Payment Note'}
+              </Text>
+              <TextInput
+                style={styles.textInput}
+                placeholder={
+                  paymentActionType === 'additional'
+                    ? 'e.g. Additional advance, Emergency help'
+                    : 'e.g. Received via Bank / Cash'
+                }
+                placeholderTextColor="#6B7280"
+                value={paymentNote}
+                onChangeText={setPaymentNote}
+              />
+
+              <Pressable style={styles.submitModalBtn} onPress={handleSubmitPayment}>
+                <Text style={styles.submitModalBtnText}>
+                  {paymentActionType === 'additional'
+                    ? selectedDebt?.type === 'lent'
+                      ? 'Confirm Diye Aur'
+                      : 'Confirm Liye Aur'
+                    : 'Confirm Payment'}
+                </Text>
+              </Pressable>
+            </ScrollView>
           </View>
-        </View>
+        </KeyboardAvoidingView>
       </Modal>
 
       {/* MODAL 3: Person Ledger / Transaction History */}
@@ -826,9 +1005,16 @@ export default function LoansScreen({
         visible={isHistoryModalOpen}
         animationType="slide"
         transparent
-        onRequestClose={() => setHistoryModalOpen(false)}
+        onRequestClose={() => {
+          if (!isKeyboardVisible) {
+            setHistoryModalOpen(false);
+          }
+        }}
       >
-        <View style={styles.modalOverlay}>
+        <KeyboardAvoidingView
+          behavior={Platform.OS === 'ios' ? 'padding' : undefined}
+          style={styles.modalOverlay}
+        >
           <View style={[styles.modalCard, { maxHeight: '80%' }]}>
             <View style={styles.modalHeader}>
               <View>
@@ -837,7 +1023,7 @@ export default function LoansScreen({
                   {selectedDebt?.type === 'lent' ? 'Maine Diye (Lena Hai)' : 'Maine Liye (Dena Hai)'}
                 </Text>
               </View>
-              <Pressable onPress={() => setHistoryModalOpen(false)}>
+              <Pressable onPress={() => setHistoryModalOpen(false)} hitSlop={12}>
                 <Text style={styles.modalCloseText}>✕</Text>
               </Pressable>
             </View>
@@ -908,14 +1094,14 @@ export default function LoansScreen({
                 style={[styles.submitModalBtn, { marginTop: 16 }]}
                 onPress={() => {
                   setHistoryModalOpen(false);
-                  handleOpenPayment(selectedDebt);
+                  handleOpenPayment(selectedDebt, 'repayment');
                 }}
               >
                 <Text style={styles.submitModalBtnText}>+ Record New Payment</Text>
               </Pressable>
             )}
           </View>
-        </View>
+        </KeyboardAvoidingView>
       </Modal>
     </View>
   );
@@ -1582,5 +1768,46 @@ const styles = StyleSheet.create({
     color: 'rgba(255, 255, 255, 0.45)',
     fontSize: 11,
     marginTop: 2,
+  },
+  actionBtnAdditional: {
+    backgroundColor: 'rgba(248, 113, 113, 0.15)',
+    borderWidth: 1,
+    borderColor: 'rgba(248, 113, 113, 0.4)',
+    paddingHorizontal: 10,
+    paddingVertical: 6,
+    borderRadius: 8,
+  },
+  actionBtnAdditionalText: {
+    color: '#F87171',
+    fontSize: 11,
+    fontWeight: '700',
+  },
+  fabBtn: {
+    position: 'absolute',
+    right: 20,
+    bottom: 24,
+    backgroundColor: '#6EE7B7',
+    flexDirection: 'row',
+    alignItems: 'center',
+    paddingHorizontal: 18,
+    paddingVertical: 12,
+    borderRadius: 28,
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 4 },
+    shadowOpacity: 0.35,
+    shadowRadius: 6,
+    elevation: 8,
+  },
+  fabBtnIcon: {
+    fontSize: 20,
+    fontWeight: '800',
+    color: '#1B1B3A',
+    marginRight: 4,
+    lineHeight: 22,
+  },
+  fabBtnText: {
+    fontSize: 14,
+    fontWeight: '800',
+    color: '#1B1B3A',
   },
 });

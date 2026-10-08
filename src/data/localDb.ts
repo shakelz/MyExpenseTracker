@@ -71,6 +71,7 @@ export async function ensureTablesAndMigrations(db: SQLiteDatabase): Promise<voi
       remaining_amount REAL NOT NULL,
       note TEXT,
       due_date TEXT,
+      date TEXT,
       status TEXT NOT NULL DEFAULT 'pending',
       created_at TEXT DEFAULT CURRENT_TIMESTAMP,
       updated_at TEXT DEFAULT CURRENT_TIMESTAMP
@@ -104,6 +105,7 @@ export async function ensureTablesAndMigrations(db: SQLiteDatabase): Promise<voi
     remaining_amount: 'REAL DEFAULT 0',
     note: 'TEXT',
     due_date: 'TEXT',
+    date: 'TEXT',
     status: "TEXT DEFAULT 'pending'",
     created_at: 'TEXT DEFAULT CURRENT_TIMESTAMP',
     updated_at: 'TEXT DEFAULT CURRENT_TIMESTAMP',
@@ -119,6 +121,7 @@ export async function ensureTablesAndMigrations(db: SQLiteDatabase): Promise<voi
     category: 'TEXT',
     account_id: 'INTEGER',
     note: 'TEXT',
+    ref_id: 'TEXT',
   });
 
   await ensureColumns(db, 'accounts', {
@@ -137,8 +140,92 @@ export async function ensureTablesAndMigrations(db: SQLiteDatabase): Promise<voi
     await db.executeSql(
       "UPDATE debts SET updated_at = created_at WHERE updated_at IS NULL OR updated_at = '';",
     );
+    await db.executeSql(
+      'UPDATE debts SET date = created_at WHERE date IS NULL OR date = \'\';',
+    );
   } catch (e) {
     // ignore
+  }
+
+  // Purge any fake promo transactions and duplicate status updates
+  await cleanExistingDuplicatesAndFakeTransactions(db);
+}
+
+async function cleanExistingDuplicatesAndFakeTransactions(db: SQLiteDatabase): Promise<void> {
+  try {
+    // 1. Delete known fake promotional transactions
+    const fakeKeywords = [
+      '%Joins Revolut Earn%',
+      '%Was Fast Your Transfer%',
+      '%Transfer to News%',
+      '%Transfer to Scopex%',
+    ];
+
+    for (const pattern of fakeKeywords) {
+      const [fakeRows] = await db.executeSql(
+        'SELECT id, amount, type, account_id FROM transactions WHERE note LIKE ?',
+        [pattern],
+      );
+      if (fakeRows && fakeRows.rows.length > 0) {
+        for (let i = 0; i < fakeRows.rows.length; i++) {
+          const row = fakeRows.rows.item(i);
+          if (row.account_id) {
+            const delta = row.type === 'income' ? -Number(row.amount) : Number(row.amount);
+            await db.executeSql(
+              'UPDATE accounts SET balance = balance + ? WHERE id = ?',
+              [delta, row.account_id],
+            );
+          }
+          await db.executeSql('DELETE FROM transactions WHERE id = ?', [row.id]);
+        }
+      }
+    }
+
+    // 2. Deduplicate existing duplicate transactions (same amount, same type within 24 hours)
+    const [allTxs] = await db.executeSql(
+      'SELECT id, type, amount, note, account_id, created_at, ref_id FROM transactions ORDER BY created_at ASC, id ASC',
+    );
+    if (allTxs && allTxs.rows.length > 1) {
+      const seen: any[] = [];
+      const toDelete: any[] = [];
+
+      for (let i = 0; i < allTxs.rows.length; i++) {
+        const tx = allTxs.rows.item(i);
+        const time = new Date(tx.created_at).getTime() || 0;
+        const amt = Math.round(Number(tx.amount) * 100);
+
+        let isDup = false;
+        for (const existing of seen) {
+          const existingAmt = Math.round(Number(existing.amount) * 100);
+          if (
+            existing.type === tx.type &&
+            existingAmt === amt &&
+            Math.abs(time - existing.time) < 24 * 3600 * 1000
+          ) {
+            isDup = true;
+            toDelete.push(tx);
+            break;
+          }
+        }
+
+        if (!isDup) {
+          seen.push({ ...tx, time });
+        }
+      }
+
+      for (const dup of toDelete) {
+        if (dup.account_id) {
+          const delta = dup.type === 'income' ? -Number(dup.amount) : Number(dup.amount);
+          await db.executeSql(
+            'UPDATE accounts SET balance = balance + ? WHERE id = ?',
+            [delta, dup.account_id],
+          );
+        }
+        await db.executeSql('DELETE FROM transactions WHERE id = ?', [dup.id]);
+      }
+    }
+  } catch (err) {
+    console.warn('[localDb] Error cleaning duplicates:', err);
   }
 }
 
@@ -153,9 +240,86 @@ async function getDb(): Promise<SQLiteDatabase> {
   return dbPromise;
 }
 
+export async function cleanExistingDuplicateTransactions(): Promise<{ removedCount: number }> {
+  const db = await getDb();
+  try {
+    const [result] = await db.executeSql(
+      `SELECT t.id, t.type, t.amount, t.note, t.account_id as accountId, t.created_at as createdAt
+       FROM transactions t
+       ORDER BY t.created_at ASC, t.id ASC`
+    );
+    const rows = result.rows;
+    const kept: any[] = [];
+    const toDeleteIds: number[] = [];
+
+    for (let i = 0; i < rows.length; i++) {
+      const current = rows.item(i);
+      const currentTime = new Date(current.createdAt).getTime();
+
+      const duplicateOf = kept.find(prev => {
+        const prevTime = new Date(prev.createdAt).getTime();
+        const sameAmount = Math.abs(Number(prev.amount) - Number(current.amount)) < 0.01;
+        const sameType = prev.type === current.type;
+        const sameAccount = (prev.accountId && current.accountId && prev.accountId === current.accountId) ||
+                            (!prev.accountId && !current.accountId);
+        const timeDiff = Math.abs(currentTime - prevTime);
+
+        // Within 12 hours from same account
+        if (sameAmount && sameType && sameAccount && timeDiff < 12 * 3600 * 1000) {
+          const prevNote = (prev.note || '').trim().toLowerCase();
+          const currNote = (current.note || '').trim().toLowerCase();
+          if (prevNote === currNote) return true;
+          if (!prevNote || !currNote) return true;
+          if (prevNote.includes('wise') && currNote.includes('wise')) return true;
+          if (prevNote.includes('transfer') && currNote.includes('transfer')) return true;
+          if (prevNote.includes('scopex') && currNote.includes('scopex')) return true;
+          if (prevNote.includes('was fast') || currNote.includes('was fast')) return true;
+          if (currNote === 'transfer to news') return true;
+          if (timeDiff < 60 * 60 * 1000) return true;
+        }
+        return false;
+      });
+
+      if (duplicateOf) {
+        toDeleteIds.push(current.id);
+        const prevNote = (duplicateOf.note || '').trim();
+        const currNote = (current.note || '').trim();
+        if ((!prevNote || prevNote.includes('Was Fast') || prevNote === 'Transfer to News') &&
+            currNote && !currNote.includes('Was Fast') && currNote !== 'Transfer to News') {
+          await db.executeSql('UPDATE transactions SET note = ? WHERE id = ?', [currNote, duplicateOf.id]);
+          duplicateOf.note = currNote;
+        }
+      } else {
+        kept.push(current);
+      }
+    }
+
+    if (toDeleteIds.length > 0) {
+      console.log(`[LocalDb] Purging ${toDeleteIds.length} duplicate transactions from database...`);
+      for (const delId of toDeleteIds) {
+        const [txRow] = await db.executeSql('SELECT * FROM transactions WHERE id = ?', [delId]);
+        if (txRow && txRow.rows.length > 0) {
+          const item = txRow.rows.item(0);
+          if (item.account_id) {
+            const delta = item.type === 'income' ? -Number(item.amount) : Number(item.amount);
+            await db.executeSql('UPDATE accounts SET balance = balance + ? WHERE id = ?', [delta, item.account_id]);
+          }
+        }
+        await db.executeSql('DELETE FROM transactions WHERE id = ?', [delId]);
+      }
+    }
+
+    return { removedCount: toDeleteIds.length };
+  } catch (err) {
+    console.warn('[LocalDb] Error during duplicate transactions cleanup:', err);
+    return { removedCount: 0 };
+  }
+}
+
 export async function initLocalDb(): Promise<void> {
   const db = await getDb();
   await ensureTablesAndMigrations(db);
+  await cleanExistingDuplicateTransactions();
 }
 
 
@@ -247,14 +411,15 @@ export async function createLocalDebt(payload: {
     remaining_amount: 'REAL DEFAULT 0',
     note: 'TEXT',
     due_date: 'TEXT',
+    date: 'TEXT',
     status: "TEXT DEFAULT 'pending'",
     created_at: 'TEXT DEFAULT CURRENT_TIMESTAMP',
     updated_at: 'TEXT DEFAULT CURRENT_TIMESTAMP',
   });
 
   const result = await db.executeSql(
-    `INSERT INTO debts (person_name, phone, type, amount, remaining_amount, note, due_date, status, created_at, updated_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?)`,
+    `INSERT INTO debts (person_name, phone, type, amount, remaining_amount, note, due_date, date, status, created_at, updated_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?)`,
     [
       payload.personName,
       payload.phone || null,
@@ -263,6 +428,7 @@ export async function createLocalDebt(payload: {
       amount,
       payload.note || null,
       payload.dueDate || null,
+      now,
       now,
       now,
     ],
@@ -478,6 +644,95 @@ export async function addDebtRepayment(
   };
 }
 
+export async function addDebtAdditional(
+  debtId: string,
+  amount: number,
+  note?: string,
+): Promise<{ debt: Debt; transaction: DebtTransaction }> {
+  const db = await getDb();
+  await db.executeSql(
+    `CREATE TABLE IF NOT EXISTS debt_transactions (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      debt_id INTEGER NOT NULL,
+      amount REAL NOT NULL,
+      note TEXT,
+      type TEXT NOT NULL DEFAULT 'repayment',
+      created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+      FOREIGN KEY (debt_id) REFERENCES debts(id)
+    );`,
+  );
+
+  const [debtResult] = await db.executeSql('SELECT * FROM debts WHERE id = ?', [debtId]);
+  if (!debtResult || !debtResult.rows.length) {
+    throw new Error('Debt record not found');
+  }
+  const currentDebt = toDebt(debtResult.rows.item(0));
+  const addAmount = Number(amount || 0);
+  const now = new Date().toISOString();
+
+  const txResult = await db.executeSql(
+    'INSERT INTO debt_transactions (debt_id, amount, note, type, created_at) VALUES (?, ?, ?, ?, ?)',
+    [debtId, addAmount, note || null, 'additional', now],
+  );
+
+  let txInsertId = txResult && txResult[0] ? txResult[0].insertId : undefined;
+  if (!txInsertId || txInsertId <= 0) {
+    try {
+      const [lastRes] = await db.executeSql('SELECT last_insert_rowid() as id');
+      if (lastRes && lastRes.rows.length > 0) {
+        txInsertId = lastRes.rows.item(0).id;
+      }
+    } catch {}
+  }
+
+  const nextAmount = currentDebt.amount + addAmount;
+  const nextRemaining = currentDebt.remainingAmount + addAmount;
+  const nextStatus: DebtStatus = 'pending';
+
+  await db.executeSql(
+    'UPDATE debts SET amount = ?, remaining_amount = ?, status = ?, updated_at = ? WHERE id = ?',
+    [nextAmount, nextRemaining, nextStatus, now, debtId],
+  );
+
+  let updatedDebt: Debt = {
+    ...currentDebt,
+    amount: nextAmount,
+    remainingAmount: nextRemaining,
+    status: nextStatus,
+    updatedAt: now,
+  };
+
+  try {
+    const [updatedDebtResult] = await db.executeSql('SELECT * FROM debts WHERE id = ?', [debtId]);
+    if (updatedDebtResult && updatedDebtResult.rows.length > 0) {
+      updatedDebt = toDebt(updatedDebtResult.rows.item(0));
+    }
+  } catch {}
+
+  let txObj: DebtTransaction = {
+    id: String(txInsertId || Date.now()),
+    debtId: String(debtId),
+    amount: addAmount,
+    note,
+    type: 'additional',
+    createdAt: now,
+  };
+
+  if (txInsertId) {
+    try {
+      const [txRowResult] = await db.executeSql('SELECT * FROM debt_transactions WHERE id = ?', [txInsertId]);
+      if (txRowResult && txRowResult.rows.length > 0) {
+        txObj = toDebtTransaction(txRowResult.rows.item(0));
+      }
+    } catch {}
+  }
+
+  return {
+    debt: updatedDebt,
+    transaction: txObj,
+  };
+}
+
 export async function fetchDebtTransactions(debtId: string): Promise<DebtTransaction[]> {
   const db = await getDb();
   const [result] = await db.executeSql(
@@ -581,8 +836,8 @@ export async function restoreFullBackupData(
   // Restore debts
   for (const d of debts) {
     await db.executeSql(
-      `INSERT INTO debts (id, person_name, phone, type, amount, remaining_amount, note, due_date, status, created_at, updated_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      `INSERT INTO debts (id, person_name, phone, type, amount, remaining_amount, note, due_date, date, status, created_at, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       [
         d.id,
         d.personName,
@@ -592,6 +847,7 @@ export async function restoreFullBackupData(
         d.remainingAmount ?? d.amount,
         d.note || null,
         d.dueDate || null,
+        d.createdAt || now,
         d.status || 'pending',
         d.createdAt,
         d.updatedAt || d.createdAt,
@@ -732,6 +988,7 @@ const toTransaction = (row: any): QuickTransaction => ({
   accountName: row.accountName || undefined,
   accountType: row.accountType || undefined,
   category: row.category || undefined,
+  refId: row.refId || row.ref_id || undefined,
 });
 
 export async function fetchLocalAccounts(): Promise<Account[]> {
@@ -750,7 +1007,7 @@ export async function fetchLocalAccounts(): Promise<Account[]> {
 export async function fetchLocalTransactions(): Promise<QuickTransaction[]> {
   const db = await getDb();
   const [result] = await db.executeSql(
-    `SELECT t.id, t.type, t.amount, t.note, t.account_id as accountId, t.category, t.created_at as createdAt,
+    `SELECT t.id, t.type, t.amount, t.note, t.account_id as accountId, t.category, t.ref_id as refId, t.created_at as createdAt,
             a.name as accountName, a.type as accountType
      FROM transactions t
      LEFT JOIN accounts a ON a.id = t.account_id
@@ -848,6 +1105,7 @@ export async function createLocalTransaction(payload: {
   accountType?: Account['type'];
   createdAt?: string;
   category?: string;
+  refId?: string;
   deduplicate?: boolean;
 }): Promise<{ transaction: QuickTransaction; account?: Account; isDuplicate?: boolean }> {
   const db = await getDb();
@@ -858,31 +1116,79 @@ export async function createLocalTransaction(payload: {
     payload.accountType,
   );
 
-  // Database-Level Deduplication Check (Window: 45 seconds, matching note/account)
+  const cleanRefId = (payload.refId || '').trim();
+
+  // 1. Permanent deduplication by Reference ID / Trx ID
+  if (cleanRefId) {
+    try {
+      const [refExisting] = await db.executeSql(
+        `SELECT t.id, t.type, t.amount, t.note, t.account_id as accountId, t.category, t.ref_id as refId, t.created_at as createdAt,
+                a.name as accountName, a.type as accountType
+         FROM transactions t
+         LEFT JOIN accounts a ON a.id = t.account_id
+         WHERE t.ref_id = ? LIMIT 1`,
+        [cleanRefId],
+      );
+      if (refExisting && refExisting.rows.length > 0) {
+        const row = refExisting.rows.item(0);
+        console.log('[LocalDb] Duplicate transaction suppressed by permanent refId:', cleanRefId);
+        const existingNote = (row.note || '').trim();
+        const incomingNote = (payload.note || '').trim();
+        if (incomingNote && incomingNote !== existingNote &&
+            (existingNote.includes('Was Fast') || existingNote === 'Transfer to News' || existingNote === 'Bank Transfer' || !existingNote)) {
+          await db.executeSql('UPDATE transactions SET note = ? WHERE id = ?', [incomingNote, row.id]);
+          row.note = incomingNote;
+        }
+        return { transaction: toTransaction(row), account: account ?? undefined, isDuplicate: true };
+      }
+    } catch (e) {
+      console.warn('[LocalDb] RefId deduplication query error:', e);
+    }
+  }
+
+  // 2. Sliding window deduplication check (24-hour window)
   if (payload.deduplicate) {
-    const windowStart = new Date(Date.now() - 45 * 1000).toISOString();
+    const windowStart = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString();
     try {
       const [existing] = await db.executeSql(
-        `SELECT t.id, t.type, t.amount, t.note, t.account_id as accountId, t.category, t.created_at as createdAt,
+        `SELECT t.id, t.type, t.amount, t.note, t.account_id as accountId, t.category, t.ref_id as refId, t.created_at as createdAt,
                 a.name as accountName, a.type as accountType
          FROM transactions t
          LEFT JOIN accounts a ON a.id = t.account_id
          WHERE t.type = ? AND ABS(t.amount - ?) < 0.01 AND t.created_at >= ?
-         ORDER BY t.id DESC LIMIT 5`,
+         ORDER BY t.id DESC LIMIT 10`,
         [payload.type, payload.amount, windowStart],
       );
       if (existing && existing.rows.length > 0) {
         const payloadNote = (payload.note || '').trim().toLowerCase();
         const payloadAccount = (payload.accountName || '').trim().toLowerCase();
+        const payloadTime = new Date(payload.createdAt || Date.now()).getTime();
+
         for (let i = 0; i < existing.rows.length; i++) {
           const row = existing.rows.item(i);
           const rowNote = (row.note || '').trim().toLowerCase();
           const rowAccount = (row.accountName || '').trim().toLowerCase();
-          // Suppress only if note matches or same account without notes
-          if (rowNote === payloadNote || (!rowNote && !payloadNote && rowAccount === payloadAccount)) {
-            console.log('[LocalDb] Duplicate transaction detected within 45s window, suppressing duplicate:', payload);
-            const existingTx = toTransaction(row);
-            return { transaction: existingTx, account: account ?? undefined, isDuplicate: true };
+          const rowTime = new Date(row.createdAt).getTime();
+          const timeDiff = Math.abs(payloadTime - rowTime);
+
+          const isNoteMatch = rowNote === payloadNote || (!rowNote && !payloadNote);
+          const isSameAccount = rowAccount === payloadAccount || (!rowAccount && !payloadAccount) ||
+                                rowAccount === 'bank account' || payloadAccount === 'bank account';
+          const isTransferUpdate = (rowNote.includes('transfer') && payloadNote.includes('transfer')) ||
+                                   (rowNote.includes('wise') && payloadNote.includes('wise')) ||
+                                   (rowNote.includes('was fast') || payloadNote.includes('was fast')) ||
+                                   (rowNote.includes('news') || payloadNote.includes('news'));
+
+          if ((isNoteMatch && isSameAccount) || (isSameAccount && timeDiff < 4 * 3600 * 1000 && isTransferUpdate) || (timeDiff < 10 * 60 * 1000 && isSameAccount)) {
+            console.log('[LocalDb] Duplicate transaction detected within 24h window, suppressing duplicate:', payload);
+            const existingRawNote = (row.note || '').trim();
+            const incomingRawNote = (payload.note || '').trim();
+            if (incomingRawNote && incomingRawNote !== existingRawNote &&
+                (existingRawNote.includes('Was Fast') || existingRawNote === 'Transfer to News' || !existingRawNote)) {
+              await db.executeSql('UPDATE transactions SET note = ? WHERE id = ?', [incomingRawNote, row.id]);
+              row.note = incomingRawNote;
+            }
+            return { transaction: toTransaction(row), account: account ?? undefined, isDuplicate: true };
           }
         }
       }
@@ -903,13 +1209,14 @@ export async function createLocalTransaction(payload: {
   const accountIdToUse = account ? account.id : null;
   const createdAt = payload.createdAt || new Date().toISOString();
   const result = await db.executeSql(
-    'INSERT INTO transactions (type, amount, note, account_id, category, created_at) VALUES (?, ?, ?, ?, ?, ?)',
+    'INSERT INTO transactions (type, amount, note, account_id, category, ref_id, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)',
     [
       payload.type,
       payload.amount,
       payload.note || null,
       accountIdToUse,
       payload.category || null,
+      cleanRefId || null,
       createdAt,
     ],
   );
