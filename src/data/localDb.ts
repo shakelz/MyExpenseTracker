@@ -153,7 +153,7 @@ export async function ensureTablesAndMigrations(db: SQLiteDatabase): Promise<voi
         "UPDATE debts SET note = notes WHERE (note IS NULL OR note = '') AND notes IS NOT NULL;",
       );
     } catch {}
-  } catch (e) {
+  } catch {
     // ignore
   }
 
@@ -1058,7 +1058,7 @@ export async function seedLocalDataIfEmpty(): Promise<void> {
   }
 }
 
-const toAccount = (row: any): Account => ({
+const mapRowToAccount = (row: any): Account => ({
   id: String(row.id),
   name: row.name,
   type: row.type,
@@ -1089,7 +1089,7 @@ export async function fetchLocalAccounts(): Promise<Account[]> {
   const rows = result.rows;
   const list: Account[] = [];
   for (let i = 0; i < rows.length; i += 1) {
-    list.push(toAccount(rows.item(i)));
+    list.push(mapRowToAccount(rows.item(i)));
   }
   return list;
 }
@@ -1137,14 +1137,14 @@ export async function createLocalAccount(payload: {
     try {
       const [rowResult] = await db.executeSql('SELECT * FROM accounts WHERE id = ?', [insertId]);
       if (rowResult && rowResult.rows.length > 0) {
-        return toAccount(rowResult.rows.item(0));
+        return mapRowToAccount(rowResult.rows.item(0));
       }
     } catch {}
   }
 
   const [latest] = await db.executeSql('SELECT * FROM accounts ORDER BY id DESC LIMIT 1');
   if (latest && latest.rows.length > 0) {
-    return toAccount(latest.rows.item(0));
+    return mapRowToAccount(latest.rows.item(0));
   }
 
   return {
@@ -1164,7 +1164,7 @@ async function findAccountByIdOrName(
   if (accountId) {
     const [result] = await db.executeSql('SELECT * FROM accounts WHERE id = ?', [accountId]);
     if (result.rows.length) {
-      return toAccount(result.rows.item(0));
+      return mapRowToAccount(result.rows.item(0));
     }
   }
   if (accountName && accountType) {
@@ -1173,7 +1173,7 @@ async function findAccountByIdOrName(
       [accountName.trim(), accountType.trim()],
     );
     if (result.rows.length) {
-      return toAccount(result.rows.item(0));
+      return mapRowToAccount(result.rows.item(0));
     }
   }
   if (accountName) {
@@ -1182,7 +1182,7 @@ async function findAccountByIdOrName(
       [accountName.trim()],
     );
     if (result.rows.length) {
-      return toAccount(result.rows.item(0));
+      return mapRowToAccount(result.rows.item(0));
     }
   }
   return null;
@@ -1566,13 +1566,13 @@ export async function deleteLocalTransaction(
   if (account) {
     const [rowResult] = await db.executeSql('SELECT * FROM accounts WHERE id = ?', [account.id]);
     if (rowResult.rows.length) {
-      updatedSource = toAccount(rowResult.rows.item(0));
+      updatedSource = mapRowToAccount(rowResult.rows.item(0));
     }
   }
   if (destAccount) {
     const [rowResult] = await db.executeSql('SELECT * FROM accounts WHERE id = ?', [destAccount.id]);
     if (rowResult.rows.length) {
-      updatedDest = toAccount(rowResult.rows.item(0));
+      updatedDest = mapRowToAccount(rowResult.rows.item(0));
     }
   }
   return { account: updatedSource, toAccount: updatedDest };
@@ -1592,7 +1592,7 @@ export async function updateLocalAccount(
     [payload.name, payload.type, Number(payload.balance || 0), id],
   );
   const [rowResult] = await db.executeSql('SELECT * FROM accounts WHERE id = ?', [id]);
-  return toAccount(rowResult.rows.item(0));
+  return mapRowToAccount(rowResult.rows.item(0));
 }
 
 export async function deleteLocalAccount(

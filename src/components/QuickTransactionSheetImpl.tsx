@@ -132,7 +132,7 @@ export default function QuickTransactionSheet({
     setSelectedToAccountId(accounts.find(a => a.id !== firstAccId)?.id ?? null);
     const defaults = defaultType === 'expense' ? EXPENSE_CATEGORIES : defaultType === 'income' ? INCOME_CATEGORIES : TRANSFER_CATEGORIES;
     setCategory(defaults[0] ?? null);
-  }, [visible, embedded, initialValue]);
+  }, [visible, embedded, initialValue, accounts]);
 
   // AI Category Suggestion based on note
   const aiSuggestedCategory = useMemo(() => predictCategory(note, type), [note, type]);

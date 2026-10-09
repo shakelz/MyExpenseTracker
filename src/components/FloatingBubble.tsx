@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   Animated,
   Easing,
@@ -41,21 +41,7 @@ export default function FloatingBubble({
   const [isAnimating, setIsAnimating] = useState(false);
   const wasOpenRef = useRef(isOpen);
 
-  useEffect(() => {
-    if (!isOpen && wasOpenRef.current) {
-      animateTo(lastIdlePosition.current);
-    }
-    wasOpenRef.current = isOpen;
-  }, [isOpen]);
-
-  useEffect(() => {
-    if (initialPosition) {
-      position.setValue(initialPosition);
-      lastIdlePosition.current = initialPosition;
-    }
-  }, [initialPosition, position]);
-
-  const animateTo = (target: { x: number; y: number }, cb?: () => void) => {
+  const animateTo = useCallback((target: { x: number; y: number }, cb?: () => void) => {
     setIsAnimating(true);
     Animated.timing(position, {
       toValue: target,
@@ -67,7 +53,21 @@ export default function FloatingBubble({
       setIsAnimating(false);
       cb?.();
     });
-  };
+  }, [position]);
+
+  useEffect(() => {
+    if (!isOpen && wasOpenRef.current) {
+      animateTo(lastIdlePosition.current);
+    }
+    wasOpenRef.current = isOpen;
+  }, [isOpen, animateTo]);
+
+  useEffect(() => {
+    if (initialPosition) {
+      position.setValue(initialPosition);
+      lastIdlePosition.current = initialPosition;
+    }
+  }, [initialPosition, position]);
 
   const animateToCenter = () => {
     const center = {

@@ -1,11 +1,9 @@
 import React, { useMemo, useState } from 'react';
 import {
-  FlatList,
   Pressable,
   ScrollView,
   StyleSheet,
   Text,
-  useWindowDimensions,
   View,
 } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
@@ -30,12 +28,11 @@ const monthLabel = (index: number, withYear = false) => {
 
 export default function AnalysisScreen({
   transactions,
-  accounts,
+  accounts: _accounts,
   currencySymbol,
   onBack,
 }: AnalysisScreenProps) {
   const safeAreaInsets = useSafeAreaInsets();
-  const { width } = useWindowDimensions();
 
   const today = useMemo(() => new Date(), []);
   const baseMonthIndex = useMemo(() => getMonthIndex(today), [today]);
@@ -128,6 +125,10 @@ export default function AnalysisScreen({
     const expenseChangePct =
       prevExpense > 0 ? ((expense - prevExpense) / prevExpense) * 100 : null;
 
+    // Month-over-month income change %
+    const incomeChangePct =
+      prevIncome > 0 ? ((income - prevIncome) / prevIncome) * 100 : null;
+
     // Categories sorted by highest spend
     const sortedCategories = Object.entries(categoryMap)
       .map(([name, amount]) => ({
@@ -156,6 +157,7 @@ export default function AnalysisScreen({
       income,
       expense,
       transfers,
+      prevIncome,
       prevExpense,
       netSavings,
       savingsRate,
@@ -164,6 +166,7 @@ export default function AnalysisScreen({
       peakDay,
       peakDayAmount,
       expenseChangePct,
+      incomeChangePct,
       sortedCategories,
       topExpenses,
       sortedAccounts,

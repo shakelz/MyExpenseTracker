@@ -342,6 +342,17 @@ export function calculateFinancialHealth(
     });
   }
 
+  // F. Internal Transfers insight
+  if (currentMonthTransfers > 0) {
+    insights.push({
+      id: 'transfers-volume',
+      type: 'info',
+      icon: '🔁',
+      title: 'Internal Transfers',
+      description: `You moved ${currencySymbol}${Math.round(currentMonthTransfers).toLocaleString()} between accounts this month. Internal transfers do not reduce your net savings.`,
+    });
+  }
+
   // F. General actionable tip
   if (insights.length < 3) {
     insights.push({
@@ -466,10 +477,10 @@ export function parseBankAlertOrReceiptWithAI(
   // 4. Extract Clean Note & Merchant
   let note = '';
   const merchantPatterns = [
-    /(?:paid to|sent to|at)\s+([A-Za-z0-9\s&'-]{3,35})(?:\s+on|\s+via|\.|\,|$)/i,
-    /(?:from|received from)\s+([A-Za-z0-9\s&'-]{3,35})(?:\s+on|\s+via|\.|\,|$)/i,
-    /(?:to)\s+([A-Za-z0-9\s&'-]{3,35})(?:\s+on|\s+via|\.|\,|$)/i,
-    /(?:for)\s+([A-Za-z0-9\s&'-]{3,35})(?:\s+on|\s+via|\.|\,|$)/i,
+    /(?:paid to|sent to|at)\s+([A-Za-z0-9\s&'-]{3,35})(?:\s+on|\s+via|\.|,|$)/i,
+    /(?:from|received from)\s+([A-Za-z0-9\s&'-]{3,35})(?:\s+on|\s+via|\.|,|$)/i,
+    /(?:to)\s+([A-Za-z0-9\s&'-]{3,35})(?:\s+on|\s+via|\.|,|$)/i,
+    /(?:for)\s+([A-Za-z0-9\s&'-]{3,35})(?:\s+on|\s+via|\.|,|$)/i,
   ];
 
   for (const pattern of merchantPatterns) {

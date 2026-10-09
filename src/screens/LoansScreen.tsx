@@ -16,7 +16,7 @@ import {
   View,
 } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
-import { Account, Debt, DebtStatus, DebtTransaction, DebtType } from '../data/models';
+import { Account, Debt, DebtTransaction, DebtType } from '../data/models';
 
 type LoansScreenProps = {
   debts: Debt[];
@@ -323,17 +323,32 @@ export default function LoansScreen({
     const url = phoneClean
       ? `whatsapp://send?phone=${phoneClean}&text=${encodeURIComponent(message)}`
       : `whatsapp://send?text=${encodeURIComponent(message)}`;
+    const webFallbackUrl = phoneClean
+      ? `https://api.whatsapp.com/send?phone=${phoneClean}&text=${encodeURIComponent(message)}`
+      : `https://api.whatsapp.com/send?text=${encodeURIComponent(message)}`;
 
     Linking.canOpenURL(url)
       .then(supported => {
         if (supported) {
           Linking.openURL(url);
         } else {
-          Alert.alert('WhatsApp', 'WhatsApp is not installed on this device.');
+          Linking.canOpenURL(webFallbackUrl)
+            .then(webSupported => {
+              if (webSupported) {
+                Linking.openURL(webFallbackUrl);
+              } else {
+                Alert.alert('WhatsApp', 'WhatsApp is not installed on this device.');
+              }
+            })
+            .catch(() => {
+              Alert.alert('WhatsApp', 'WhatsApp is not installed on this device.');
+            });
         }
       })
       .catch(() => {
-        Alert.alert('Error', 'Unable to open WhatsApp.');
+        Linking.openURL(webFallbackUrl).catch(() => {
+          Alert.alert('Error', 'Unable to open WhatsApp.');
+        });
       });
   };
 

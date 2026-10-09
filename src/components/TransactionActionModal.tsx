@@ -22,7 +22,7 @@ type TransactionActionModalProps = {
 export default function TransactionActionModal({
   visible,
   transaction,
-  currencySymbol,
+  currencySymbol: _currencySymbol,
   formatCurrency,
   onClose,
   onEdit,

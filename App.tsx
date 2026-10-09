@@ -27,7 +27,7 @@ import AccountSheet from './src/components/AccountSheet';
 import TransactionCard from './src/components/TransactionCard';
 import TransactionActionModal from './src/components/TransactionActionModal';
 import UndoSnackbar from './src/components/UndoSnackbar';
-import { Account, Debt, DebtTransaction, DebtType, QuickTransaction } from './src/data/models';
+import { Account, Debt, DebtType, QuickTransaction } from './src/data/models';
 import AnalysisScreen from './src/screens/AnalysisScreen';
 import LoansScreen from './src/screens/LoansScreen';
 import AIScreen from './src/screens/AIScreen';
@@ -72,7 +72,6 @@ import {
   seedLocalDataIfEmpty,
   setLocalSetting,
   updateLocalAccount,
-  updateLocalDebt,
   updateLocalTransaction,
 } from './src/data/localDb';
 import { EXPENSE_CATEGORIES, INCOME_CATEGORIES } from './src/data/categories';
@@ -159,7 +158,7 @@ function AppContent() {
   const getMonthIndex = (date: Date) => date.getFullYear() * 12 + date.getMonth();
   const currentMonthIndex = useMemo(
     () => getMonthIndex(new Date()),
-    [transactions],
+    [],
   );
   const currentMonthTransactions = useMemo(
     () =>
@@ -212,7 +211,7 @@ function AppContent() {
       if (pending && pending !== '[]') {
         try {
           const items = JSON.parse(pending) as QuickTransaction[];
-          mergePendingTransactions(items);
+          await mergePendingTransactions(items);
           await clearPendingBubbleTransactions();
         } catch {
           // ignore parse errors
@@ -277,12 +276,22 @@ function AppContent() {
         if (pending && pending !== '[]') {
           try {
             const items = JSON.parse(pending) as QuickTransaction[];
-            mergePendingTransactions(items);
+            await mergePendingTransactions(items);
             await clearPendingBubbleTransactions();
           } catch {
             // ignore parse errors
           }
         }
+        try {
+          const [accountList, transactionList, debtList] = await Promise.all([
+            fetchLocalAccounts(),
+            fetchLocalTransactions(),
+            fetchLocalDebts(),
+          ]);
+          setAccounts(accountList);
+          setTransactions(transactionList);
+          setDebts(debtList);
+        } catch {}
         return;
       }
       const granted = await checkOverlayPermission();
