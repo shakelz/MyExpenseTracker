@@ -32,6 +32,7 @@ export default function TransactionActionModal({
   if (!transaction) return null;
 
   const isIncome = transaction.type === 'income';
+  const isTransfer = transaction.type === 'transfer';
 
   return (
     <Modal
@@ -50,27 +51,37 @@ export default function TransactionActionModal({
               <View
                 style={[
                   styles.iconWrap,
-                  isIncome ? styles.iconWrapIncome : styles.iconWrapExpense,
+                  isIncome
+                    ? styles.iconWrapIncome
+                    : isTransfer
+                      ? styles.iconWrapTransfer
+                      : styles.iconWrapExpense,
                 ]}
               >
-                <Text style={styles.iconText}>{isIncome ? '💳' : '🛒'}</Text>
+                <Text style={styles.iconText}>
+                  {isIncome ? '💳' : isTransfer ? '🔄' : '🛒'}
+                </Text>
               </View>
               <View style={styles.previewInfo}>
                 <Text style={styles.previewTitle} numberOfLines={1}>
-                  {transaction.note || (isIncome ? 'Income' : 'Expense')}
+                  {transaction.note || (isIncome ? 'Income' : isTransfer ? 'Bank Transfer' : 'Expense')}
                 </Text>
                 <Text style={styles.previewSub}>
-                  {transaction.category || 'Other'}
+                  {transaction.category || (isTransfer ? 'Transfer' : 'Other')}
                   {transaction.accountName ? ` · ${transaction.accountName}` : ''}
                 </Text>
               </View>
               <Text
                 style={[
                   styles.previewAmount,
-                  isIncome ? styles.amountIncome : styles.amountExpense,
+                  isIncome
+                    ? styles.amountIncome
+                    : isTransfer
+                      ? styles.amountTransfer
+                      : styles.amountExpense,
                 ]}
               >
-                {isIncome ? '+' : '-'}
+                {isIncome ? '+' : isTransfer ? '↔ ' : '-'}
                 {formatCurrency(transaction.amount)}
               </Text>
             </View>
@@ -216,6 +227,9 @@ const styles = StyleSheet.create({
   iconWrapIncome: {
     backgroundColor: '#DCFCE7',
   },
+  iconWrapTransfer: {
+    backgroundColor: '#E0F2FE',
+  },
   iconText: {
     fontSize: 18,
   },
@@ -242,6 +256,9 @@ const styles = StyleSheet.create({
   },
   amountIncome: {
     color: '#16A34A',
+  },
+  amountTransfer: {
+    color: '#0284C7',
   },
   previewDivider: {
     height: 1,

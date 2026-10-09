@@ -104,12 +104,12 @@ export default function TransactionCard({
         >
           <View style={styles.transactionIcon}>
             <Text style={styles.transactionIconText}>
-              {item.type === 'income' ? '💳' : '🛒'}
+              {item.type === 'income' ? '💳' : item.type === 'transfer' ? '🔄' : '🛒'}
             </Text>
           </View>
           <View style={styles.transactionInfo}>
             <Text style={styles.transactionTitle}>
-              {item.note || (item.type === 'income' ? 'Income' : 'Expense')}
+              {item.note || (item.type === 'income' ? 'Income' : item.type === 'transfer' ? 'Bank Transfer' : 'Expense')}
             </Text>
             <Text style={styles.transactionMeta}>
               {new Date(item.createdAt).toLocaleDateString('en-GB', {
@@ -127,9 +127,10 @@ export default function TransactionCard({
             style={[
               styles.transactionAmount,
               item.type === 'expense' && styles.expenseText,
+              item.type === 'transfer' && styles.transferText,
             ]}
           >
-            {item.type === 'income' ? '+' : '-'}
+            {item.type === 'income' ? '+' : item.type === 'transfer' ? '↔ ' : '-'}
             {formatCurrency(item.amount)}
           </Text>
         </Pressable>
@@ -193,6 +194,9 @@ const styles = StyleSheet.create({
   },
   expenseText: {
     color: '#E14B4B',
+  },
+  transferText: {
+    color: '#0EA5E9',
   },
   leftActionsContainer: {
     width: 75,

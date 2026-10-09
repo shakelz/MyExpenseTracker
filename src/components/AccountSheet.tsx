@@ -1,5 +1,6 @@
 import React, { useEffect, useMemo, useState } from 'react';
 import {
+  Alert,
   Animated,
   Easing,
   Keyboard,
@@ -88,14 +89,17 @@ export default function AccountSheet({
   }, [initialValue, visible]);
 
   const handleSubmit = () => {
-    if (!name.trim()) {
+    const trimmedName = name.trim();
+    if (!trimmedName) {
+      Alert.alert('Required', 'Please enter an account name.');
       return;
     }
-    const amount = Number(balance);
+    const cleanBalance = balance.replace(/,/g, '').trim();
+    const amount = Number(cleanBalance);
     const nextBalance = Number.isNaN(amount) ? 0 : amount;
     onSubmit({
       id: initialValue?.id ?? String(Date.now()),
-      name: name.trim(),
+      name: trimmedName,
       type,
       balance: nextBalance,
     });
@@ -107,8 +111,21 @@ export default function AccountSheet({
 
   const handleDelete = () => {
     if (initialValue && onDelete) {
-      onDelete(initialValue);
-      onClose();
+      Alert.alert(
+        'Delete Account',
+        `Are you sure you want to delete "${initialValue.name}"? All transactions associated with this account will also be permanently deleted.`,
+        [
+          { text: 'Cancel', style: 'cancel' },
+          {
+            text: 'Delete',
+            style: 'destructive',
+            onPress: () => {
+              onDelete(initialValue);
+              onClose();
+            },
+          },
+        ],
+      );
     }
   };
 

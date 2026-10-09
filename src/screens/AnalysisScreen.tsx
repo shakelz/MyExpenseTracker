@@ -47,10 +47,10 @@ export default function AnalysisScreen({
       maximumFractionDigits: 2,
     })}`;
 
-  // Month options (last 6 months)
+  // Month options (last 6 months, newest first so current month is immediately active & visible)
   const monthOptions = useMemo(() => {
     const count = 6;
-    return Array.from({ length: count }, (_, idx) => baseMonthIndex - (count - 1 - idx));
+    return Array.from({ length: count }, (_, idx) => baseMonthIndex - idx);
   }, [baseMonthIndex]);
 
   // Statistics calculation
@@ -60,6 +60,7 @@ export default function AnalysisScreen({
 
     let income = 0;
     let expense = 0;
+    let transfers = 0;
     let prevIncome = 0;
     let prevExpense = 0;
 
@@ -83,7 +84,7 @@ export default function AnalysisScreen({
         const day = d.getDate();
         if (t.type === 'income') {
           income += t.amount;
-        } else {
+        } else if (t.type === 'expense') {
           expense += t.amount;
           daySpendMap[day] = (daySpendMap[day] || 0) + t.amount;
 
@@ -92,11 +93,13 @@ export default function AnalysisScreen({
 
           const accName = t.accountName?.trim() || 'Unassigned';
           accountSpendMap[accName] = (accountSpendMap[accName] || 0) + t.amount;
+        } else if (t.type === 'transfer') {
+          transfers += t.amount;
         }
       } else if (mIdx === previousMonthIndex) {
         if (t.type === 'income') {
           prevIncome += t.amount;
-        } else {
+        } else if (t.type === 'expense') {
           prevExpense += t.amount;
         }
       }
@@ -152,6 +155,7 @@ export default function AnalysisScreen({
     return {
       income,
       expense,
+      transfers,
       prevExpense,
       netSavings,
       savingsRate,
@@ -170,13 +174,16 @@ export default function AnalysisScreen({
 
   const getCategoryEmoji = (name: string) => {
     const lower = name.toLowerCase();
-    if (lower.includes('food') || lower.includes('groc') || lower.includes('eat')) return '🛒';
-    if (lower.includes('bill') || lower.includes('util')) return '⚡';
-    if (lower.includes('shop') || lower.includes('cloth')) return '🛍️';
-    if (lower.includes('travel') || lower.includes('fuel') || lower.includes('ride')) return '🚗';
-    if (lower.includes('health') || lower.includes('med')) return '💊';
-    if (lower.includes('fun') || lower.includes('entertain')) return '🎬';
-    if (lower.includes('salary') || lower.includes('work')) return '💼';
+    if (lower.includes('food') || lower.includes('groc') || lower.includes('eat') || lower.includes('restaur') || lower.includes('dine')) return '🛒';
+    if (lower.includes('bill') || lower.includes('util') || lower.includes('elect') || lower.includes('gas') || lower.includes('water')) return '⚡';
+    if (lower.includes('shop') || lower.includes('cloth') || lower.includes('store') || lower.includes('amazon')) return '🛍️';
+    if (lower.includes('transport') || lower.includes('travel') || lower.includes('fuel') || lower.includes('ride') || lower.includes('flight') || lower.includes('train') || lower.includes('uber') || lower.includes('cab')) return '🚗';
+    if (lower.includes('health') || lower.includes('med') || lower.includes('pharm') || lower.includes('doctor')) return '💊';
+    if (lower.includes('fun') || lower.includes('entertain') || lower.includes('movie') || lower.includes('game')) return '🎬';
+    if (lower.includes('subscri') || lower.includes('stream') || lower.includes('netflix') || lower.includes('spotify')) return '📱';
+    if (lower.includes('rent') || lower.includes('hous') || lower.includes('home') || lower.includes('maint')) return '🏠';
+    if (lower.includes('invest') || lower.includes('stock') || lower.includes('crypto') || lower.includes('sav')) return '📈';
+    if (lower.includes('salary') || lower.includes('work') || lower.includes('wages') || lower.includes('paycheck')) return '💼';
     return '💳';
   };
 
@@ -283,6 +290,14 @@ export default function AnalysisScreen({
               <Text style={styles.flowAmountExpense}>{formatCurrency(stats.expense)}</Text>
             </View>
           </View>
+
+          {stats.transfers > 0 && (
+            <View style={styles.transfersNoteRow}>
+              <Text style={styles.transfersNoteText}>
+                🔄 Internal Transfers: {formatCurrency(stats.transfers)} (Excluded from outflow)
+              </Text>
+            </View>
+          )}
 
           {/* Savings Rate Progress Meter */}
           <View style={styles.savingsMeterWrap}>
@@ -614,6 +629,21 @@ const styles = StyleSheet.create({
     color: 'rgba(255, 255, 255, 0.5)',
     marginTop: 8,
     lineHeight: 15,
+  },
+  transfersNoteRow: {
+    marginTop: 10,
+    backgroundColor: 'rgba(56, 189, 248, 0.1)',
+    borderRadius: 8,
+    paddingVertical: 6,
+    paddingHorizontal: 10,
+    alignItems: 'center',
+    borderWidth: 1,
+    borderColor: 'rgba(56, 189, 248, 0.25)',
+  },
+  transfersNoteText: {
+    color: '#38BDF8',
+    fontSize: 11,
+    fontWeight: '600',
   },
   sectionContainer: {
     marginHorizontal: 20,

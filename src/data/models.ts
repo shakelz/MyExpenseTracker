@@ -7,7 +7,7 @@ export type Account = {
   balance: number;
 };
 
-export type TransactionType = 'income' | 'expense';
+export type TransactionType = 'income' | 'expense' | 'transfer';
 
 export type QuickTransaction = {
   id: string;
@@ -18,6 +18,9 @@ export type QuickTransaction = {
   accountId?: string;
   accountName?: string;
   accountType?: AccountType;
+  toAccountId?: string;
+  toAccountName?: string;
+  toAccountType?: AccountType;
   category?: string;
   refId?: string;
 };

@@ -15,3 +15,12 @@ export const INCOME_CATEGORIES = [
   'Interest',
   'Other',
 ];
+
+export const TRANSFER_CATEGORIES = [
+  'Bank Transfer',
+  'Cash Withdrawal',
+  'Cash Deposit',
+  'Card Payment',
+  'Wallet Transfer',
+  'Other',
+];

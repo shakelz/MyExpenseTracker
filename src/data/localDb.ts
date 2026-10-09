@@ -120,6 +120,7 @@ export async function ensureTablesAndMigrations(db: SQLiteDatabase): Promise<voi
   await ensureColumns(db, 'transactions', {
     category: 'TEXT',
     account_id: 'INTEGER',
+    to_account_id: 'INTEGER',
     note: 'TEXT',
     ref_id: 'TEXT',
   });
@@ -355,6 +356,12 @@ export async function clearLocalData(): Promise<void> {
   await db.executeSql('DELETE FROM debts');
   await db.executeSql('DELETE FROM transactions');
   await db.executeSql('DELETE FROM accounts');
+}
+
+export async function clearLocalTransactionsOnly(): Promise<void> {
+  const db = await getDb();
+  await db.executeSql('DELETE FROM transactions');
+  await db.executeSql('UPDATE accounts SET balance = 0');
 }
 
 const toDebt = (row: any): Debt => {
@@ -748,6 +755,85 @@ export async function fetchDebtTransactions(debtId: string): Promise<DebtTransac
   return list;
 }
 
+export async function deleteDebtTransaction(
+  debtId: string,
+  transactionId: string,
+): Promise<Debt | null> {
+  const db = await getDb();
+  const numTxId = Number(transactionId) || 0;
+  const [txResult] = await db.executeSql(
+    'SELECT * FROM debt_transactions WHERE id = ? OR id = ?',
+    [transactionId, numTxId],
+  );
+  if (!txResult || !txResult.rows.length) {
+    return null;
+  }
+  const tx = toDebtTransaction(txResult.rows.item(0));
+
+  const numDebtId = Number(debtId) || 0;
+  const [debtResult] = await db.executeSql(
+    'SELECT rowid, * FROM debts WHERE id = ? OR rowid = ?',
+    [debtId, numDebtId],
+  );
+  if (!debtResult || !debtResult.rows.length) {
+    await db.executeSql('DELETE FROM debt_transactions WHERE id = ? OR id = ?', [
+      transactionId,
+      numTxId,
+    ]);
+    return null;
+  }
+  const currentDebt = toDebt(debtResult.rows.item(0));
+  const now = new Date().toISOString();
+
+  let nextAmount = currentDebt.amount;
+  let nextRemaining = currentDebt.remainingAmount;
+  let nextStatus: DebtStatus = currentDebt.status;
+
+  if (tx.type === 'additional') {
+    nextAmount = Math.max(0, currentDebt.amount - tx.amount);
+    nextRemaining = Math.max(0, currentDebt.remainingAmount - tx.amount);
+    nextStatus =
+      nextRemaining <= 0
+        ? 'settled'
+        : nextRemaining < nextAmount
+        ? 'partially_paid'
+        : 'pending';
+  } else {
+    // repayment reversal
+    nextRemaining = Math.min(
+      currentDebt.amount,
+      currentDebt.remainingAmount + tx.amount,
+    );
+    nextStatus =
+      nextRemaining >= currentDebt.amount ? 'pending' : 'partially_paid';
+  }
+
+  await db.executeSql(
+    'UPDATE debts SET amount = ?, remaining_amount = ?, status = ?, updated_at = ? WHERE id = ? OR rowid = ?',
+    [nextAmount, nextRemaining, nextStatus, now, currentDebt.id, numDebtId],
+  );
+
+  await db.executeSql(
+    'DELETE FROM debt_transactions WHERE id = ? OR id = ?',
+    [transactionId, numTxId],
+  );
+
+  const [refreshedResult] = await db.executeSql(
+    'SELECT rowid, * FROM debts WHERE id = ? OR rowid = ?',
+    [currentDebt.id, numDebtId],
+  );
+  if (refreshedResult && refreshedResult.rows.length > 0) {
+    return toDebt(refreshedResult.rows.item(0));
+  }
+  return {
+    ...currentDebt,
+    amount: nextAmount,
+    remainingAmount: nextRemaining,
+    status: nextStatus,
+    updatedAt: now,
+  };
+}
+
 export async function exportFullBackupData(): Promise<string> {
   const db = await getDb();
   const accounts = await fetchLocalAccounts();
@@ -829,8 +915,8 @@ export async function restoreFullBackupData(
   // Restore transactions
   for (const tx of transactions) {
     await db.executeSql(
-      'INSERT INTO transactions (id, type, amount, note, account_id, category, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)',
-      [tx.id, tx.type, tx.amount, tx.note || null, tx.accountId || null, tx.category || null, tx.createdAt],
+      'INSERT INTO transactions (id, type, amount, note, account_id, to_account_id, category, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)',
+      [tx.id, tx.type, tx.amount, tx.note || null, tx.accountId || null, tx.toAccountId || tx.to_account_id || null, tx.category || null, tx.createdAt],
     );
   }
 
@@ -988,6 +1074,9 @@ const toTransaction = (row: any): QuickTransaction => ({
   accountId: row.accountId ? String(row.accountId) : row.account_id ? String(row.account_id) : undefined,
   accountName: row.accountName || undefined,
   accountType: row.accountType || undefined,
+  toAccountId: row.toAccountId ? String(row.toAccountId) : row.to_account_id ? String(row.to_account_id) : undefined,
+  toAccountName: row.toAccountName || undefined,
+  toAccountType: row.toAccountType || undefined,
   category: row.category || undefined,
   refId: row.refId || row.ref_id || undefined,
 });
@@ -1008,10 +1097,12 @@ export async function fetchLocalAccounts(): Promise<Account[]> {
 export async function fetchLocalTransactions(): Promise<QuickTransaction[]> {
   const db = await getDb();
   const [result] = await db.executeSql(
-    `SELECT t.id, t.type, t.amount, t.note, t.account_id as accountId, t.category, t.ref_id as refId, t.created_at as createdAt,
-            a.name as accountName, a.type as accountType
+    `SELECT t.id, t.type, t.amount, t.note, t.account_id as accountId, t.to_account_id as toAccountId, t.category, t.ref_id as refId, t.created_at as createdAt,
+            a.name as accountName, a.type as accountType,
+            a2.name as toAccountName, a2.type as toAccountType
      FROM transactions t
      LEFT JOIN accounts a ON a.id = t.account_id
+     LEFT JOIN accounts a2 ON a2.id = t.to_account_id
      ORDER BY t.created_at DESC`,
   );
   const rows = result.rows;
@@ -1104,11 +1195,14 @@ export async function createLocalTransaction(payload: {
   accountId?: string;
   accountName?: string;
   accountType?: Account['type'];
+  toAccountId?: string;
+  toAccountName?: string;
+  toAccountType?: Account['type'];
   createdAt?: string;
   category?: string;
   refId?: string;
   deduplicate?: boolean;
-}): Promise<{ transaction: QuickTransaction; account?: Account; isDuplicate?: boolean }> {
+}): Promise<{ transaction: QuickTransaction; account?: Account; toAccount?: Account; isDuplicate?: boolean }> {
   const db = await getDb();
   let account = await findAccountByIdOrName(
     db,
@@ -1116,6 +1210,14 @@ export async function createLocalTransaction(payload: {
     payload.accountName,
     payload.accountType,
   );
+  let toAccount = (payload.toAccountId || payload.toAccountName)
+    ? await findAccountByIdOrName(
+        db,
+        payload.toAccountId,
+        payload.toAccountName,
+        payload.toAccountType,
+      )
+    : null;
 
   const cleanRefId = (payload.refId || '').trim();
 
@@ -1123,10 +1225,12 @@ export async function createLocalTransaction(payload: {
   if (cleanRefId) {
     try {
       const [refExisting] = await db.executeSql(
-        `SELECT t.id, t.type, t.amount, t.note, t.account_id as accountId, t.category, t.ref_id as refId, t.created_at as createdAt,
-                a.name as accountName, a.type as accountType
+        `SELECT t.id, t.type, t.amount, t.note, t.account_id as accountId, t.to_account_id as toAccountId, t.category, t.ref_id as refId, t.created_at as createdAt,
+                a.name as accountName, a.type as accountType,
+                a2.name as toAccountName, a2.type as toAccountType
          FROM transactions t
          LEFT JOIN accounts a ON a.id = t.account_id
+         LEFT JOIN accounts a2 ON a2.id = t.to_account_id
          WHERE t.ref_id = ? LIMIT 1`,
         [cleanRefId],
       );
@@ -1140,7 +1244,7 @@ export async function createLocalTransaction(payload: {
           await db.executeSql('UPDATE transactions SET note = ? WHERE id = ?', [incomingNote, row.id]);
           row.note = incomingNote;
         }
-        return { transaction: toTransaction(row), account: account ?? undefined, isDuplicate: true };
+        return { transaction: toTransaction(row), account: account ?? undefined, toAccount: toAccount ?? undefined, isDuplicate: true };
       }
     } catch (e) {
       console.warn('[LocalDb] RefId deduplication query error:', e);
@@ -1152,10 +1256,12 @@ export async function createLocalTransaction(payload: {
     const windowStart = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString();
     try {
       const [existing] = await db.executeSql(
-        `SELECT t.id, t.type, t.amount, t.note, t.account_id as accountId, t.category, t.ref_id as refId, t.created_at as createdAt,
-                a.name as accountName, a.type as accountType
+        `SELECT t.id, t.type, t.amount, t.note, t.account_id as accountId, t.to_account_id as toAccountId, t.category, t.ref_id as refId, t.created_at as createdAt,
+                a.name as accountName, a.type as accountType,
+                a2.name as toAccountName, a2.type as toAccountType
          FROM transactions t
          LEFT JOIN accounts a ON a.id = t.account_id
+         LEFT JOIN accounts a2 ON a2.id = t.to_account_id
          WHERE t.type = ? AND ABS(t.amount - ?) < 0.01 AND t.created_at >= ?
          ORDER BY t.id DESC LIMIT 10`,
         [payload.type, payload.amount, windowStart],
@@ -1189,7 +1295,7 @@ export async function createLocalTransaction(payload: {
               await db.executeSql('UPDATE transactions SET note = ? WHERE id = ?', [incomingRawNote, row.id]);
               row.note = incomingRawNote;
             }
-            return { transaction: toTransaction(row), account: account ?? undefined, isDuplicate: true };
+            return { transaction: toTransaction(row), account: account ?? undefined, toAccount: toAccount ?? undefined, isDuplicate: true };
           }
         }
       }
@@ -1207,15 +1313,26 @@ export async function createLocalTransaction(payload: {
     account = created;
   }
 
-  const accountIdToUse = account ? account.id : null;
+  if (!toAccount && payload.toAccountName && payload.toAccountType) {
+    const created = await createLocalAccount({
+      name: payload.toAccountName,
+      type: payload.toAccountType,
+      balance: 0,
+    });
+    toAccount = created;
+  }
+
+  const accountIdToUse = account ? account.id : (payload.accountId || null);
+  const toAccountIdToUse = toAccount ? toAccount.id : (payload.toAccountId || null);
   const createdAt = payload.createdAt || new Date().toISOString();
   const result = await db.executeSql(
-    'INSERT INTO transactions (type, amount, note, account_id, category, ref_id, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)',
+    'INSERT INTO transactions (type, amount, note, account_id, to_account_id, category, ref_id, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)',
     [
       payload.type,
       payload.amount,
       payload.note || null,
       accountIdToUse,
+      toAccountIdToUse,
       payload.category || null,
       cleanRefId || null,
       createdAt,
@@ -1231,7 +1348,18 @@ export async function createLocalTransaction(payload: {
     } catch {}
   }
 
-  if (account) {
+  if (payload.type === 'transfer') {
+    if (account) {
+      const nextSourceBalance = Number(account.balance) - Number(payload.amount);
+      await db.executeSql('UPDATE accounts SET balance = ? WHERE id = ?', [nextSourceBalance, account.id]);
+      account = { ...account, balance: nextSourceBalance };
+    }
+    if (toAccount) {
+      const nextDestBalance = Number(toAccount.balance) + Number(payload.amount);
+      await db.executeSql('UPDATE accounts SET balance = ? WHERE id = ?', [nextDestBalance, toAccount.id]);
+      toAccount = { ...toAccount, balance: nextDestBalance };
+    }
+  } else if (account) {
     const delta = payload.type === 'income' ? Number(payload.amount) : -Number(payload.amount);
     const nextBalance = Number(account.balance) + delta;
     await db.executeSql('UPDATE accounts SET balance = ? WHERE id = ?', [nextBalance, account.id]);
@@ -1242,10 +1370,12 @@ export async function createLocalTransaction(payload: {
   if (insertId) {
     try {
       const [res] = await db.executeSql(
-        `SELECT t.id, t.type, t.amount, t.note, t.account_id as accountId, t.category, t.created_at as createdAt,
-                a.name as accountName, a.type as accountType
+        `SELECT t.id, t.type, t.amount, t.note, t.account_id as accountId, t.to_account_id as toAccountId, t.category, t.created_at as createdAt,
+                a.name as accountName, a.type as accountType,
+                a2.name as toAccountName, a2.type as toAccountType
          FROM transactions t
          LEFT JOIN accounts a ON a.id = t.account_id
+         LEFT JOIN accounts a2 ON a2.id = t.to_account_id
          WHERE t.id = ?`,
         [insertId],
       );
@@ -1258,10 +1388,12 @@ export async function createLocalTransaction(payload: {
   if (!rowResult) {
     try {
       const [latest] = await db.executeSql(
-        `SELECT t.id, t.type, t.amount, t.note, t.account_id as accountId, t.category, t.created_at as createdAt,
-                a.name as accountName, a.type as accountType
+        `SELECT t.id, t.type, t.amount, t.note, t.account_id as accountId, t.to_account_id as toAccountId, t.category, t.created_at as createdAt,
+                a.name as accountName, a.type as accountType,
+                a2.name as toAccountName, a2.type as toAccountType
          FROM transactions t
          LEFT JOIN accounts a ON a.id = t.account_id
+         LEFT JOIN accounts a2 ON a2.id = t.to_account_id
          ORDER BY t.id DESC LIMIT 1`,
       );
       if (latest && latest.rows.length > 0) {
@@ -1274,6 +1406,7 @@ export async function createLocalTransaction(payload: {
     return {
       transaction: toTransaction(rowResult.rows.item(0)),
       account: account ?? undefined,
+      toAccount: toAccount ?? undefined,
     };
   }
 
@@ -1283,13 +1416,17 @@ export async function createLocalTransaction(payload: {
       type: payload.type,
       amount: payload.amount,
       note: payload.note,
-      accountId: accountIdToUse || undefined,
+      accountId: accountIdToUse ? String(accountIdToUse) : undefined,
       accountName: account?.name,
       accountType: account?.type,
+      toAccountId: toAccountIdToUse ? String(toAccountIdToUse) : undefined,
+      toAccountName: toAccount?.name,
+      toAccountType: toAccount?.type,
       category: payload.category,
       createdAt,
     },
     account: account ?? undefined,
+    toAccount: toAccount ?? undefined,
   };
 }
 
@@ -1372,10 +1509,12 @@ export async function updateLocalTransaction(
   }
 
   const [rowResult] = await db.executeSql(
-    `SELECT t.id, t.type, t.amount, t.note, t.account_id as accountId, t.category, t.created_at as createdAt,
-            a.name as accountName, a.type as accountType
+    `SELECT t.id, t.type, t.amount, t.note, t.account_id as accountId, t.to_account_id as toAccountId, t.category, t.created_at as createdAt,
+            a.name as accountName, a.type as accountType,
+            a2.name as toAccountName, a2.type as toAccountType
      FROM transactions t
      LEFT JOIN accounts a ON a.id = t.account_id
+     LEFT JOIN accounts a2 ON a2.id = t.to_account_id
      WHERE t.id = ?`,
     [id],
   );
@@ -1388,7 +1527,7 @@ export async function updateLocalTransaction(
 
 export async function deleteLocalTransaction(
   id: string,
-): Promise<{ account?: Account }> {
+): Promise<{ account?: Account; toAccount?: Account }> {
   const db = await getDb();
   const [existingResult] = await db.executeSql(
     'SELECT * FROM transactions WHERE id = ?',
@@ -1399,9 +1538,20 @@ export async function deleteLocalTransaction(
   }
   const existing = existingResult.rows.item(0);
   const accountId = existing.account_id ? String(existing.account_id) : undefined;
+  const toAccountId = existing.to_account_id ? String(existing.to_account_id) : undefined;
   const account = accountId ? await findAccountByIdOrName(db, accountId) : null;
+  const destAccount = toAccountId ? await findAccountByIdOrName(db, toAccountId) : null;
 
-  if (account) {
+  if (existing.type === 'transfer') {
+    if (account) {
+      const nextBalance = Number(account.balance) + Number(existing.amount);
+      await db.executeSql('UPDATE accounts SET balance = ? WHERE id = ?', [nextBalance, account.id]);
+    }
+    if (destAccount) {
+      const nextDestBalance = Number(destAccount.balance) - Number(existing.amount);
+      await db.executeSql('UPDATE accounts SET balance = ? WHERE id = ?', [nextDestBalance, destAccount.id]);
+    }
+  } else if (account) {
     const delta = existing.type === 'income'
       ? -Number(existing.amount)
       : Number(existing.amount);
@@ -1411,13 +1561,21 @@ export async function deleteLocalTransaction(
 
   await db.executeSql('DELETE FROM transactions WHERE id = ?', [id]);
 
+  let updatedSource: Account | undefined;
+  let updatedDest: Account | undefined;
   if (account) {
     const [rowResult] = await db.executeSql('SELECT * FROM accounts WHERE id = ?', [account.id]);
     if (rowResult.rows.length) {
-      return { account: toAccount(rowResult.rows.item(0)) };
+      updatedSource = toAccount(rowResult.rows.item(0));
     }
   }
-  return {};
+  if (destAccount) {
+    const [rowResult] = await db.executeSql('SELECT * FROM accounts WHERE id = ?', [destAccount.id]);
+    if (rowResult.rows.length) {
+      updatedDest = toAccount(rowResult.rows.item(0));
+    }
+  }
+  return { account: updatedSource, toAccount: updatedDest };
 }
 
 export async function updateLocalAccount(
@@ -1442,14 +1600,14 @@ export async function deleteLocalAccount(
 ): Promise<{ accountId: string; transactionIds: string[] }> {
   const db = await getDb();
   const [transactionResult] = await db.executeSql(
-    'SELECT id FROM transactions WHERE account_id = ?',
-    [id],
+    'SELECT id FROM transactions WHERE account_id = ? OR to_account_id = ?',
+    [id, id],
   );
   const transactionIds: string[] = [];
   for (let i = 0; i < transactionResult.rows.length; i += 1) {
     transactionIds.push(String(transactionResult.rows.item(i).id));
   }
-  await db.executeSql('DELETE FROM transactions WHERE account_id = ?', [id]);
+  await db.executeSql('DELETE FROM transactions WHERE account_id = ? OR to_account_id = ?', [id, id]);
   await db.executeSql('DELETE FROM accounts WHERE id = ?', [id]);
   return { accountId: id, transactionIds };
 }

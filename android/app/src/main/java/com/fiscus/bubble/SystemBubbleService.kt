@@ -20,6 +20,7 @@ import android.os.VibrationEffect
 import android.os.Vibrator
 import android.util.TypedValue
 import android.view.Gravity
+import android.view.KeyEvent
 import android.view.MotionEvent
 import android.view.VelocityTracker
 import android.view.View
@@ -32,6 +33,7 @@ import android.widget.FrameLayout
 import android.widget.HorizontalScrollView
 import android.widget.ImageView
 import android.widget.LinearLayout
+import android.widget.ScrollView
 import android.widget.Spinner
 import android.widget.TextView
 import android.widget.Toast
@@ -361,7 +363,16 @@ class SystemBubbleService : Service() {
     if (formView != null) return
     val wm = windowManager ?: return
 
-    val root = FrameLayout(this).apply {
+    val root = object : FrameLayout(this) {
+      override fun dispatchKeyEvent(event: KeyEvent): Boolean {
+        if (event.keyCode == KeyEvent.KEYCODE_BACK && event.action == KeyEvent.ACTION_UP) {
+          vibrateDevice(15)
+          closeFormAndReturnBubble()
+          return true
+        }
+        return super.dispatchKeyEvent(event)
+      }
+    }.apply {
       layoutParams = FrameLayout.LayoutParams(
         FrameLayout.LayoutParams.MATCH_PARENT,
         FrameLayout.LayoutParams.MATCH_PARENT
@@ -548,6 +559,7 @@ class SystemBubbleService : Service() {
       textSize = 26f
       setTypeface(typeface, Typeface.BOLD)
       inputType = EditorInfo.TYPE_CLASS_NUMBER or EditorInfo.TYPE_NUMBER_FLAG_DECIMAL
+      imeOptions = EditorInfo.IME_ACTION_NEXT
       setPadding(dpToPx(10f), dpToPx(10f), dpToPx(10f), dpToPx(10f))
       setTextColor(Color.WHITE)
       setHintTextColor(0xFF555C7E.toInt())
@@ -564,6 +576,7 @@ class SystemBubbleService : Service() {
       hint = "Note (e.g. Groceries, Coffee, Fuel)"
       textSize = 13.5f
       inputType = EditorInfo.TYPE_CLASS_TEXT or EditorInfo.TYPE_TEXT_FLAG_CAP_SENTENCES
+      imeOptions = EditorInfo.IME_ACTION_DONE
       setPadding(dpToPx(16f), dpToPx(12f), dpToPx(16f), dpToPx(12f))
       setTextColor(Color.WHITE)
       setHintTextColor(0xFF555C7E.toInt())
@@ -574,6 +587,14 @@ class SystemBubbleService : Service() {
       }
       minHeight = dpToPx(46f)
     }
+
+    amountInput.setOnEditorActionListener { _, actionId, _ ->
+      if (actionId == EditorInfo.IME_ACTION_NEXT) {
+        noteInput.requestFocus()
+        true
+      } else false
+    }
+
     cardContent.addView(noteInput)
     cardContent.addView(spaceView(12f))
 
@@ -679,7 +700,12 @@ class SystemBubbleService : Service() {
       if (option.name == ADD_ACCOUNT_OPTION) {
         "+ $ADD_ACCOUNT_OPTION"
       } else {
-        "💳 ${option.name}  ($currencySymbol${String.format(Locale.US, "%.2f", option.balance)})"
+        val icon = when (option.type.lowercase(Locale.ROOT)) {
+          "cash" -> "💵"
+          "wallet" -> "👛"
+          else -> "💳"
+        }
+        "$icon ${option.name}  ($currencySymbol${String.format(Locale.US, "%.2f", option.balance)})"
       }
     }
 
@@ -766,7 +792,18 @@ class SystemBubbleService : Service() {
       gravity = Gravity.CENTER
     }
 
-    cardContainer.addView(cardContent)
+    val cardScroll = ScrollView(this).apply {
+      isVerticalScrollBarEnabled = false
+      overScrollMode = View.OVER_SCROLL_IF_CONTENT_SCROLLS
+    }
+    cardScroll.addView(
+      cardContent,
+      FrameLayout.LayoutParams(
+        FrameLayout.LayoutParams.MATCH_PARENT,
+        FrameLayout.LayoutParams.WRAP_CONTENT
+      )
+    )
+    cardContainer.addView(cardScroll)
     root.addView(cardContainer, cardParams)
 
     // Touch outside card to close
@@ -880,7 +917,8 @@ class SystemBubbleService : Service() {
     obj.put("id", System.currentTimeMillis().toString())
     obj.put("type", type)
     obj.put("amount", amount)
-    obj.put("note", note)
+    val finalNote = if (note.isBlank()) category else note
+    obj.put("note", finalNote)
     val isoFormat = SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ss'Z'", Locale.US).apply {
       timeZone = TimeZone.getTimeZone("UTC")
     }

@@ -41,8 +41,8 @@ export default function AIScreen({
 
   // 1. Calculate live financial health report
   const healthReport = useMemo(
-    () => calculateFinancialHealth(transactions, accounts, debts),
-    [transactions, accounts, debts],
+    () => calculateFinancialHealth(transactions, accounts, debts, currencySymbol),
+    [transactions, accounts, debts, currencySymbol],
   );
 
   // 2. AI Smart Paste / SMS & Receipt Scanner State
@@ -294,16 +294,21 @@ export default function AIScreen({
             <View style={styles.parsedCard}>
               <View style={styles.parsedTopRow}>
                 <View style={styles.parsedTypeRow}>
-                  <View
+                  <Pressable
                     style={[
                       styles.typeBadge,
                       parsedTx.type === 'expense' ? styles.typeExpense : styles.typeIncome,
                     ]}
+                    onPress={() =>
+                      setParsedTx(prev =>
+                        prev ? { ...prev, type: prev.type === 'expense' ? 'income' : 'expense' } : null,
+                      )
+                    }
                   >
                     <Text style={styles.typeBadgeText}>
-                      {parsedTx.type === 'expense' ? '🔴 EXPENSE' : '🟢 INCOME'}
+                      {parsedTx.type === 'expense' ? '🔴 EXPENSE ▾' : '🟢 INCOME ▾'}
                     </Text>
-                  </View>
+                  </Pressable>
                   <Text style={styles.parsedCategoryText}>📁 {parsedTx.category}</Text>
                 </View>
                 <Text style={styles.parsedAmount}>
@@ -311,16 +316,65 @@ export default function AIScreen({
                 </Text>
               </View>
 
-              <View style={styles.parsedDetailRow}>
+              {/* Editable Merchant / Note */}
+              <View style={styles.parsedInputWrap}>
                 <Text style={styles.parsedDetailLabel}>Note / Merchant:</Text>
-                <Text style={styles.parsedDetailValue}>{parsedTx.note}</Text>
+                <TextInput
+                  style={styles.parsedEditField}
+                  value={parsedTx.note}
+                  onChangeText={txt => setParsedTx(prev => (prev ? { ...prev, note: txt } : null))}
+                  placeholder="Merchant or description"
+                  placeholderTextColor="rgba(255,255,255,0.4)"
+                />
               </View>
 
-              <View style={styles.parsedDetailRow}>
+              {/* Editable Amount */}
+              <View style={styles.parsedInputWrap}>
+                <Text style={styles.parsedDetailLabel}>Amount ({currencySymbol}):</Text>
+                <TextInput
+                  style={styles.parsedEditField}
+                  value={String(parsedTx.amount)}
+                  onChangeText={txt => {
+                    const num = parseFloat(txt);
+                    setParsedTx(prev => (prev ? { ...prev, amount: isNaN(num) ? 0 : num } : null));
+                  }}
+                  keyboardType="numeric"
+                  placeholder="0.00"
+                  placeholderTextColor="rgba(255,255,255,0.4)"
+                />
+              </View>
+
+              {/* Target Account Selector Chips */}
+              <View style={{ marginTop: 8 }}>
                 <Text style={styles.parsedDetailLabel}>Target Account:</Text>
-                <Text style={styles.parsedDetailValue}>
-                  🏦 {parsedTx.accountName || 'Primary Account'}
-                </Text>
+                <ScrollView horizontal showsHorizontalScrollIndicator={false} style={{ marginTop: 6 }}>
+                  {accounts.map(acc => {
+                    const isSelected = parsedTx.accountId === acc.id;
+                    return (
+                      <Pressable
+                        key={acc.id}
+                        onPress={() =>
+                          setParsedTx(prev =>
+                            prev ? { ...prev, accountId: acc.id, accountName: acc.name } : null,
+                          )
+                        }
+                        style={[
+                          styles.accountMiniChip,
+                          isSelected && styles.accountMiniChipSelected,
+                        ]}
+                      >
+                        <Text
+                          style={[
+                            styles.accountMiniChipText,
+                            isSelected && styles.accountMiniChipTextSelected,
+                          ]}
+                        >
+                          🏦 {acc.name}
+                        </Text>
+                      </Pressable>
+                    );
+                  })}
+                </ScrollView>
               </View>
 
               <Pressable style={styles.saveParsedBtn} onPress={handleSaveParsedTx}>
@@ -358,6 +412,18 @@ export default function AIScreen({
               onPress={() => handleRunAiQuery('What is my biggest expense category?')}
             >
               <Text style={styles.promptChipText}>💬 Top expense category</Text>
+            </Pressable>
+            <Pressable
+              style={styles.promptChip}
+              onPress={() => handleRunAiQuery('Check for duplicate charges or anomalies')}
+            >
+              <Text style={styles.promptChipText}>💬 Check duplicates</Text>
+            </Pressable>
+            <Pressable
+              style={styles.promptChip}
+              onPress={() => handleRunAiQuery('Show my internal transfers')}
+            >
+              <Text style={styles.promptChipText}>💬 Account transfers</Text>
             </Pressable>
             <Pressable
               style={styles.promptChip}
@@ -752,12 +818,49 @@ const styles = StyleSheet.create({
     paddingVertical: 10,
     borderRadius: 12,
     alignItems: 'center',
-    marginTop: 12,
+    marginTop: 14,
   },
   saveParsedBtnText: {
     color: '#1B1B3A',
     fontSize: 13,
     fontWeight: '800',
+  },
+  parsedInputWrap: {
+    marginTop: 8,
+  },
+  parsedEditField: {
+    backgroundColor: 'rgba(255, 255, 255, 0.08)',
+    borderRadius: 10,
+    paddingHorizontal: 12,
+    paddingVertical: 8,
+    color: '#FFFFFF',
+    fontSize: 13,
+    fontWeight: '600',
+    marginTop: 4,
+    borderWidth: 1,
+    borderColor: 'rgba(255, 255, 255, 0.1)',
+  },
+  accountMiniChip: {
+    backgroundColor: 'rgba(255, 255, 255, 0.08)',
+    borderRadius: 10,
+    paddingHorizontal: 10,
+    paddingVertical: 6,
+    marginRight: 8,
+    borderWidth: 1,
+    borderColor: 'rgba(255, 255, 255, 0.12)',
+  },
+  accountMiniChipSelected: {
+    backgroundColor: '#4E7CFF',
+    borderColor: '#60A5FA',
+  },
+  accountMiniChipText: {
+    fontSize: 11,
+    color: 'rgba(255, 255, 255, 0.7)',
+    fontWeight: '600',
+  },
+  accountMiniChipTextSelected: {
+    color: '#FFFFFF',
+    fontWeight: '700',
   },
   askSection: {
     backgroundColor: '#23274F',

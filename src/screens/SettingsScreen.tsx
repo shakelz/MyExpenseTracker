@@ -38,6 +38,10 @@ type SettingsScreenProps = {
     transactionsCount: number;
     debtsCount: number;
   }>;
+  monthlyBudget?: number;
+  onUpdateBudget?: (budget: number) => Promise<void>;
+  onResetAllData?: () => Promise<void>;
+  onClearTransactionsOnly?: () => Promise<void>;
 };
 
 export default function SettingsScreen({
@@ -50,8 +54,92 @@ export default function SettingsScreen({
   onOpenNotificationAccessSettings,
   onExportBackup,
   onRestoreBackup,
+  monthlyBudget = 0,
+  onUpdateBudget,
+  onResetAllData,
+  onClearTransactionsOnly,
 }: SettingsScreenProps) {
   const safeAreaInsets = useSafeAreaInsets();
+
+  // Monthly Budget State
+  const [budgetInput, setBudgetInput] = useState(
+    monthlyBudget > 0 ? String(monthlyBudget) : '',
+  );
+  const [isSavingBudget, setIsSavingBudget] = useState(false);
+
+  useEffect(() => {
+    if (monthlyBudget > 0) {
+      setBudgetInput(String(monthlyBudget));
+    }
+  }, [monthlyBudget]);
+
+  const handleSaveBudget = async (val?: number) => {
+    const target = val !== undefined ? val : parseFloat(budgetInput) || 0;
+    if (target < 0) {
+      Alert.alert('Invalid Budget', 'Budget cannot be negative.');
+      return;
+    }
+    Keyboard.dismiss();
+    setIsSavingBudget(true);
+    try {
+      await onUpdateBudget?.(target);
+      setBudgetInput(target > 0 ? String(target) : '');
+      Alert.alert(
+        'Budget Updated',
+        target > 0
+          ? `Monthly budget set to ${selectedCountry.currencySymbol}${target.toLocaleString()}.`
+          : 'Monthly budget cleared.',
+      );
+    } catch {
+      Alert.alert('Error', 'Failed to update monthly budget.');
+    } finally {
+      setIsSavingBudget(false);
+    }
+  };
+
+  const handleConfirmClearTransactions = () => {
+    Alert.alert(
+      'Clear All Transactions',
+      'This will delete all expense, income, and transfer history. Your accounts will remain. Are you sure?',
+      [
+        { text: 'Cancel', style: 'cancel' },
+        {
+          text: 'Clear Transactions',
+          style: 'destructive',
+          onPress: async () => {
+            try {
+              await onClearTransactionsOnly?.();
+              Alert.alert('Success', 'All transactions have been cleared.');
+            } catch {
+              Alert.alert('Error', 'Failed to clear transactions.');
+            }
+          },
+        },
+      ],
+    );
+  };
+
+  const handleConfirmFactoryReset = () => {
+    Alert.alert(
+      '⚠️ Factory Reset App',
+      'This will permanently reset ALL accounts, transactions, and Khata loan ledgers back to default state.\n\nAre you sure you want to proceed?',
+      [
+        { text: 'Cancel', style: 'cancel' },
+        {
+          text: 'Reset Everything',
+          style: 'destructive',
+          onPress: async () => {
+            try {
+              await onResetAllData?.();
+              Alert.alert('Reset Complete', 'App data has been reset to defaults.');
+            } catch {
+              Alert.alert('Error', 'Failed to reset app data.');
+            }
+          },
+        },
+      ],
+    );
+  };
 
   // WhatsApp-style Backup State
   const [googleAccount, setGoogleAccount] = useState('shakelz.finance@gmail.com');
@@ -500,7 +588,69 @@ export default function SettingsScreen({
           </Text>
         </View>
 
-        {/* 4. COUNTRY & CURRENCY */}
+        {/* 4. MONTHLY SPENDING BUDGET */}
+        <View style={styles.section}>
+          <View style={styles.budgetHeaderRow}>
+            <Text style={styles.sectionTitle}>Monthly Spending Budget</Text>
+            {monthlyBudget > 0 ? (
+              <View style={styles.activePill}>
+                <Text style={styles.activePillText}>
+                  {selectedCountry.currencySymbol}{monthlyBudget.toLocaleString()}/mo
+                </Text>
+              </View>
+            ) : null}
+          </View>
+          <Text style={styles.helperText}>
+            Set your target outflow ceiling for this calendar month. Progress is tracked dynamically on your dashboard.
+          </Text>
+
+          {/* Preset Chips */}
+          <View style={styles.budgetChipsRow}>
+            {[500, 1000, 2000, 3000, 5000].map(val => {
+              const isSelected = monthlyBudget === val;
+              return (
+                <Pressable
+                  key={val}
+                  style={[styles.budgetChip, isSelected && styles.budgetChipActive]}
+                  onPress={() => handleSaveBudget(val)}
+                >
+                  <Text style={[styles.budgetChipText, isSelected && styles.budgetChipTextActive]}>
+                    {selectedCountry.currencySymbol}{val >= 1000 ? `${val / 1000}k` : val}
+                  </Text>
+                </Pressable>
+              );
+            })}
+          </View>
+
+          {/* Custom Budget Input */}
+          <View style={styles.budgetInputRow}>
+            <TextInput
+              style={styles.budgetInput}
+              placeholder="Custom budget (e.g. 1500)"
+              placeholderTextColor="#6B7280"
+              keyboardType="numeric"
+              value={budgetInput}
+              onChangeText={setBudgetInput}
+            />
+            <Pressable
+              style={[styles.budgetSaveBtn, isSavingBudget && { opacity: 0.6 }]}
+              onPress={() => handleSaveBudget()}
+              disabled={isSavingBudget}
+            >
+              <Text style={styles.budgetSaveBtnText}>Set Budget</Text>
+            </Pressable>
+            {monthlyBudget > 0 ? (
+              <Pressable
+                style={styles.budgetClearBtn}
+                onPress={() => handleSaveBudget(0)}
+              >
+                <Text style={styles.budgetClearBtnText}>✕</Text>
+              </Pressable>
+            ) : null}
+          </View>
+        </View>
+
+        {/* 5. COUNTRY & CURRENCY */}
         <View style={styles.section}>
           <Text style={styles.sectionTitle}>Country & Currency</Text>
           <View style={styles.countryList}>
@@ -534,6 +684,29 @@ export default function SettingsScreen({
                 </Pressable>
               );
             })}
+          </View>
+        </View>
+
+        {/* 6. DATA MANAGEMENT & DANGER ZONE */}
+        <View style={[styles.section, styles.dangerSection]}>
+          <Text style={[styles.sectionTitle, { color: '#F87171' }]}>Data Management & Reset</Text>
+          <Text style={styles.helperText}>
+            Manage local offline SQLite database. Back up your data before resetting.
+          </Text>
+          <View style={styles.dangerButtonsCol}>
+            <Pressable
+              style={styles.clearTxBtn}
+              onPress={handleConfirmClearTransactions}
+            >
+              <Text style={styles.clearTxBtnText}>🗑 Clear All Transactions</Text>
+            </Pressable>
+
+            <Pressable
+              style={styles.factoryResetBtn}
+              onPress={handleConfirmFactoryReset}
+            >
+              <Text style={styles.factoryResetBtnText}>⚠️ Factory Reset App</Text>
+            </Pressable>
           </View>
         </View>
 
@@ -1123,6 +1296,116 @@ const styles = StyleSheet.create({
   activePillText: {
     color: '#6EE7B7',
     fontSize: 10,
+    fontWeight: '800',
+  },
+  budgetHeaderRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    marginBottom: 6,
+  },
+  budgetChipsRow: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    gap: 8,
+    marginTop: 10,
+    marginBottom: 12,
+  },
+  budgetChip: {
+    backgroundColor: 'rgba(255, 255, 255, 0.07)',
+    borderRadius: 12,
+    paddingHorizontal: 12,
+    paddingVertical: 7,
+    borderWidth: 1,
+    borderColor: 'rgba(255, 255, 255, 0.12)',
+  },
+  budgetChipActive: {
+    backgroundColor: '#4E7CFF',
+    borderColor: '#7AA3FF',
+  },
+  budgetChipText: {
+    fontSize: 12,
+    fontWeight: '700',
+    color: 'rgba(255, 255, 255, 0.75)',
+  },
+  budgetChipTextActive: {
+    color: '#FFFFFF',
+    fontWeight: '800',
+  },
+  budgetInputRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+  },
+  budgetInput: {
+    flex: 1,
+    backgroundColor: '#14172E',
+    borderRadius: 12,
+    color: '#FFFFFF',
+    paddingHorizontal: 14,
+    paddingVertical: 10,
+    fontSize: 13,
+    fontWeight: '600',
+    borderWidth: 1,
+    borderColor: 'rgba(255, 255, 255, 0.12)',
+  },
+  budgetSaveBtn: {
+    backgroundColor: '#4E7CFF',
+    borderRadius: 12,
+    paddingHorizontal: 16,
+    paddingVertical: 11,
+  },
+  budgetSaveBtnText: {
+    color: '#FFFFFF',
+    fontSize: 12,
+    fontWeight: '800',
+  },
+  budgetClearBtn: {
+    backgroundColor: 'rgba(255, 255, 255, 0.1)',
+    borderRadius: 12,
+    width: 36,
+    height: 36,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  budgetClearBtnText: {
+    color: 'rgba(255, 255, 255, 0.6)',
+    fontSize: 14,
+    fontWeight: '700',
+  },
+  dangerSection: {
+    borderColor: 'rgba(239, 68, 68, 0.25)',
+  },
+  dangerButtonsCol: {
+    marginTop: 12,
+    gap: 10,
+  },
+  clearTxBtn: {
+    backgroundColor: 'rgba(239, 68, 68, 0.12)',
+    borderRadius: 12,
+    paddingVertical: 12,
+    paddingHorizontal: 14,
+    borderWidth: 1,
+    borderColor: 'rgba(239, 68, 68, 0.3)',
+    alignItems: 'center',
+  },
+  clearTxBtnText: {
+    color: '#FCA5A5',
+    fontSize: 13,
+    fontWeight: '700',
+  },
+  factoryResetBtn: {
+    backgroundColor: 'rgba(239, 68, 68, 0.22)',
+    borderRadius: 12,
+    paddingVertical: 12,
+    paddingHorizontal: 14,
+    borderWidth: 1,
+    borderColor: '#EF4444',
+    alignItems: 'center',
+  },
+  factoryResetBtnText: {
+    color: '#FFFFFF',
+    fontSize: 13,
     fontWeight: '800',
   },
 });

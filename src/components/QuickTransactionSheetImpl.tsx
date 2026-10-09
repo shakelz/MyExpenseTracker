@@ -17,7 +17,7 @@ import {
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import DateTimePicker from '@react-native-community/datetimepicker';
 import { Account, QuickTransaction, TransactionType } from '../data/models';
-import { EXPENSE_CATEGORIES, INCOME_CATEGORIES } from '../data/categories';
+import { EXPENSE_CATEGORIES, INCOME_CATEGORIES, TRANSFER_CATEGORIES } from '../data/categories';
 import { predictCategory } from '../services/aiAdvisorService';
 
 export type QuickTransactionSheetProps = {
@@ -53,6 +53,7 @@ export default function QuickTransactionSheet({
   const [note, setNote] = useState('');
   const [keyboardHeight, setKeyboardHeight] = useState(0);
   const [selectedAccountId, setSelectedAccountId] = useState<string | null>(null);
+  const [selectedToAccountId, setSelectedToAccountId] = useState<string | null>(null);
   const [category, setCategory] = useState<string | null>(null);
   const [selectedDate, setSelectedDate] = useState<Date>(new Date());
   const [showDatePicker, setShowDatePicker] = useState(false);
@@ -106,7 +107,17 @@ export default function QuickTransactionSheet({
           (initialValue.accountId && a.id === initialValue.accountId) ||
           (initialValue.accountName && a.name.toLowerCase() === initialValue.accountName.toLowerCase()),
       );
-      setSelectedAccountId(matched?.id ?? initialValue.accountId ?? (accounts[0]?.id ?? null));
+      const matchedSourceId = matched?.id ?? initialValue.accountId ?? (accounts[0]?.id ?? null);
+      setSelectedAccountId(matchedSourceId);
+
+      const matchedTo = accounts.find(
+        a =>
+          (initialValue.toAccountId && a.id === initialValue.toAccountId) ||
+          (initialValue.toAccountName && a.name.toLowerCase() === initialValue.toAccountName.toLowerCase()),
+      );
+      const fallbackToId = accounts.find(a => a.id !== matchedSourceId)?.id ?? null;
+      setSelectedToAccountId(matchedTo?.id ?? initialValue.toAccountId ?? fallbackToId);
+
       setCategory(initialValue.category ?? null);
       setSelectedDate(initialValue.createdAt ? new Date(initialValue.createdAt) : new Date());
       return;
@@ -116,8 +127,10 @@ export default function QuickTransactionSheet({
     setAmount('');
     setNote('');
     setSelectedDate(new Date());
-    setSelectedAccountId(accounts[0]?.id ?? null);
-    const defaults = defaultType === 'expense' ? EXPENSE_CATEGORIES : INCOME_CATEGORIES;
+    const firstAccId = accounts[0]?.id ?? null;
+    setSelectedAccountId(firstAccId);
+    setSelectedToAccountId(accounts.find(a => a.id !== firstAccId)?.id ?? null);
+    const defaults = defaultType === 'expense' ? EXPENSE_CATEGORIES : defaultType === 'income' ? INCOME_CATEGORIES : TRANSFER_CATEGORIES;
     setCategory(defaults[0] ?? null);
   }, [visible, embedded, initialValue]);
 
@@ -126,11 +139,17 @@ export default function QuickTransactionSheet({
 
   const handleTypeChange = (newType: TransactionType) => {
     setType(newType);
-    const defaults = newType === 'expense' ? EXPENSE_CATEGORIES : INCOME_CATEGORIES;
+    const defaults = newType === 'expense' ? EXPENSE_CATEGORIES : newType === 'income' ? INCOME_CATEGORIES : TRANSFER_CATEGORIES;
     const isCurrentValid = category ? defaults.includes(category) : false;
     if (!isCurrentValid) {
       const suggested = predictCategory(note, newType);
       setCategory(suggested ?? defaults[0] ?? null);
+    }
+    if (newType === 'transfer' && (!selectedToAccountId || selectedToAccountId === selectedAccountId)) {
+      const other = accounts.find(a => a.id !== selectedAccountId);
+      if (other) {
+        setSelectedToAccountId(other.id);
+      }
     }
   };
 
@@ -138,17 +157,29 @@ export default function QuickTransactionSheet({
     setNote(text);
     const suggested = predictCategory(text, type);
     // If user has not picked a specific category yet or it's default General, auto-suggest
-    if (suggested && (!category || category === 'General Expense' || category === 'Salary')) {
+    if (suggested && (!category || category === 'General Expense' || category === 'Salary' || category === 'Bank Transfer')) {
       setCategory(suggested);
     }
   };
 
   const handleSubmit = () => {
-    const numericAmount = Number(amount);
-    if (!numericAmount || Number.isNaN(numericAmount)) {
+    const numericAmount = Number(amount.replace(/,/g, '.'));
+    if (!numericAmount || Number.isNaN(numericAmount) || numericAmount <= 0) {
+      Alert.alert('Invalid Amount', 'Please enter a valid amount greater than 0.');
       return;
     }
+    if (type === 'transfer') {
+      if (!selectedAccountId || !selectedToAccountId) {
+        Alert.alert('Select Accounts', 'Please select both source and destination accounts for the transfer.');
+        return;
+      }
+      if (selectedAccountId === selectedToAccountId) {
+        Alert.alert('Invalid Transfer', 'Source and destination accounts must be different.');
+        return;
+      }
+    }
     const selectedAccount = accounts.find(account => account.id === selectedAccountId);
+    const selectedToAccount = type === 'transfer' ? accounts.find(account => account.id === selectedToAccountId) : undefined;
     onSubmit({
       id: initialValue?.id ?? String(Date.now()),
       type,
@@ -158,6 +189,9 @@ export default function QuickTransactionSheet({
       accountId: selectedAccount?.id,
       accountName: selectedAccount?.name,
       accountType: selectedAccount?.type,
+      toAccountId: selectedToAccount?.id,
+      toAccountName: selectedToAccount?.name,
+      toAccountType: selectedToAccount?.type,
       category: category ?? undefined,
     });
     setAmount('');
@@ -191,7 +225,7 @@ export default function QuickTransactionSheet({
   const sheetContent = (
     <ScrollView 
       contentContainerStyle={[styles.sheetContent, { paddingBottom: keyboardHeight > 0 ? keyboardHeight : Math.max(28, safeAreaInsets.bottom + 80) }]} 
-      keyboardShouldPersistTaps="handled"
+      keyboardShouldPersistTaps="always"
       showsVerticalScrollIndicator={false}
     >
       <View style={styles.handle} />
@@ -226,6 +260,14 @@ export default function QuickTransactionSheet({
             Income
           </Text>
         </Pressable>
+        <Pressable
+          onPress={() => handleTypeChange('transfer')}
+          style={[styles.toggleButton, type === 'transfer' && styles.toggleActiveTransfer]}
+        >
+          <Text style={[styles.toggleText, type === 'transfer' && styles.toggleTextActiveTransfer]}>
+            Transfer
+          </Text>
+        </Pressable>
       </View>
       <Text style={styles.label}>Amount</Text>
       <View style={styles.amountRow}>
@@ -240,7 +282,7 @@ export default function QuickTransactionSheet({
         />
       </View>
       <View style={styles.accountHeader}>
-        <Text style={styles.label}>Source account</Text>
+        <Text style={styles.label}>{type === 'transfer' ? 'From account (Source)' : 'Source account'}</Text>
         <Pressable onPress={onAddAccount}>
           <Text style={styles.addAccountText}>Add</Text>
         </Pressable>
@@ -253,7 +295,13 @@ export default function QuickTransactionSheet({
             <Pressable
               key={account.id}
               style={[styles.accountChip, selectedAccountId === account.id && styles.accountChipActive]}
-              onPress={() => setSelectedAccountId(account.id)}
+              onPress={() => {
+                setSelectedAccountId(account.id);
+                if (type === 'transfer' && selectedToAccountId === account.id) {
+                  const other = accounts.find(a => a.id !== account.id);
+                  setSelectedToAccountId(other?.id ?? null);
+                }
+              }}
             >
               <Text style={[styles.accountChipText, selectedAccountId === account.id && styles.accountChipTextActive]}>
                 {account.name}
@@ -264,6 +312,45 @@ export default function QuickTransactionSheet({
             </Pressable>
           ))}
         </View>
+      )}
+      {type === 'transfer' && (
+        <>
+          <View style={[styles.accountHeader, { marginTop: 8 }]}>
+            <Text style={styles.label}>To account (Destination)</Text>
+          </View>
+          {accounts.length < 2 ? (
+            <Text style={styles.emptyAccountText}>Add at least 2 accounts to make a transfer.</Text>
+          ) : (
+            <View style={styles.accountRow}>
+              {accounts.map(account => {
+                const isSelected = selectedToAccountId === account.id;
+                const isSource = selectedAccountId === account.id;
+                return (
+                  <Pressable
+                    key={account.id}
+                    style={[
+                      styles.accountChip,
+                      isSelected && styles.accountChipActiveTransfer,
+                      isSource && styles.accountChipDisabled,
+                    ]}
+                    onPress={() => {
+                      if (!isSource) {
+                        setSelectedToAccountId(account.id);
+                      }
+                    }}
+                  >
+                    <Text style={[styles.accountChipText, isSelected && styles.accountChipTextActiveTransfer]}>
+                      {account.name} {isSource ? '(Source)' : ''}
+                    </Text>
+                    <Text style={styles.accountChipSub}>
+                      {account.type} · {currencySymbol}{Number(account.balance || 0).toFixed(2)}
+                    </Text>
+                  </Pressable>
+                );
+              })}
+            </View>
+          )}
+        </>
       )}
       <View style={styles.categoryHeader}>
         <Text style={styles.label}>Category</Text>
@@ -279,7 +366,7 @@ export default function QuickTransactionSheet({
         )}
       </View>
       <View style={styles.categoryRow}>
-        {(type === 'expense' ? EXPENSE_CATEGORIES : INCOME_CATEGORIES).map(item => (
+        {(type === 'expense' ? EXPENSE_CATEGORIES : type === 'income' ? INCOME_CATEGORIES : TRANSFER_CATEGORIES).map(item => (
           <Pressable
             key={item}
             style={[styles.categoryChip, category === item && styles.categoryChipActive]}
@@ -446,6 +533,10 @@ const styles = StyleSheet.create({
     backgroundColor: '#EEF3FF',
     borderColor: '#4E7CFF',
   },
+  toggleActiveTransfer: {
+    backgroundColor: '#E0F2FE',
+    borderColor: '#0284C7',
+  },
   toggleText: {
     fontSize: 14,
     fontWeight: '600',
@@ -453,6 +544,9 @@ const styles = StyleSheet.create({
   },
   toggleTextActive: {
     color: '#2343B8',
+  },
+  toggleTextActiveTransfer: {
+    color: '#0369A1',
   },
   label: {
     fontSize: 12,
@@ -505,6 +599,13 @@ const styles = StyleSheet.create({
     borderColor: '#4E7CFF',
     backgroundColor: '#EEF3FF',
   },
+  accountChipActiveTransfer: {
+    borderColor: '#0284C7',
+    backgroundColor: '#E0F2FE',
+  },
+  accountChipDisabled: {
+    opacity: 0.35,
+  },
   accountChipText: {
     fontSize: 12,
     fontWeight: '700',
@@ -512,6 +613,9 @@ const styles = StyleSheet.create({
   },
   accountChipTextActive: {
     color: '#2343B8',
+  },
+  accountChipTextActiveTransfer: {
+    color: '#0369A1',
   },
   accountChipSub: {
     fontSize: 10,

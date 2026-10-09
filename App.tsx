@@ -56,8 +56,10 @@ import {
   createLocalDebt,
   createLocalTransaction,
   clearLocalData,
+  clearLocalTransactionsOnly,
   deleteLocalAccount,
   deleteLocalDebt,
+  deleteDebtTransaction,
   deleteLocalTransaction,
   exportFullBackupData,
   fetchDebtTransactions,
@@ -120,6 +122,7 @@ function AppContent() {
   const [isNotificationAccessGranted, setNotificationAccessGranted] =
     useState(false);
   const [isPermissionModalOpen, setPermissionModalOpen] = useState(false);
+  const [monthlyBudget, setMonthlyBudget] = useState<number>(0);
 
   const countries: CountryOption[] = useMemo(
     () => [
@@ -166,18 +169,36 @@ function AppContent() {
     [currentMonthIndex, transactions],
   );
 
-  const displayedTransactions = useMemo(() => {
-    return showAllRecent ? transactions : currentMonthTransactions;
+  const [transactionTypeFilter, setTransactionTypeFilter] = useState<
+    'all' | 'expense' | 'income' | 'transfer'
+  >('all');
+
+  const transactionTypeCounts = useMemo(() => {
+    const base = showAllRecent ? transactions : currentMonthTransactions;
+    return {
+      all: base.length,
+      expense: base.filter(t => t.type === 'expense').length,
+      income: base.filter(t => t.type === 'income').length,
+      transfer: base.filter(t => t.type === 'transfer').length,
+    };
   }, [showAllRecent, transactions, currentMonthTransactions]);
+
+  const displayedTransactions = useMemo(() => {
+    const base = showAllRecent ? transactions : currentMonthTransactions;
+    if (transactionTypeFilter === 'all') return base;
+    return base.filter(item => item.type === transactionTypeFilter);
+  }, [showAllRecent, transactions, currentMonthTransactions, transactionTypeFilter]);
 
   useEffect(() => {
     let isMounted = true;
     const bootstrap = async () => {
       const granted = await requestOverlayPermission();
       const notifGranted = await checkNotificationAccessPermission();
+      const savedBubbleSetting = await getLocalSetting('bubble_enabled_setting');
+      const bubbleShouldBeActive = granted && savedBubbleSetting !== '0';
       if (isMounted) {
         setHasOverlayPermission(granted);
-        setBubbleEnabled(granted);
+        setBubbleEnabled(bubbleShouldBeActive);
         setNotificationAccessGranted(notifGranted);
         if (!notifGranted) {
           setPermissionModalOpen(true);
@@ -233,14 +254,12 @@ function AppContent() {
 
   useEffect(() => {
     const categories = [...EXPENSE_CATEGORIES, ...INCOME_CATEGORIES];
-    const bankWalletAccounts = accounts
-      .filter(account => account.type !== 'cash')
-      .map(account => ({
-        name: account.name,
-        type: account.type,
-        balance: account.balance,
-      }));
-    setBubbleOptions(categories, bankWalletAccounts);
+    const allAccounts = accounts.map(account => ({
+      name: account.name,
+      type: account.type,
+      balance: account.balance,
+    }));
+    setBubbleOptions(categories, allAccounts);
   }, [accounts]);
 
   useEffect(() => {
@@ -295,6 +314,10 @@ function AppContent() {
             setSelectedCountry(savedCountry);
           }
         }
+        const savedBudget = await getLocalSetting('monthly_budget');
+        if (savedBudget) {
+          setMonthlyBudget(parseFloat(savedBudget) || 0);
+        }
         await seedLocalDataIfEmpty();
         const [accountList, transactionList, debtList] = await Promise.all([
           fetchLocalAccounts(),
@@ -348,6 +371,13 @@ function AppContent() {
     return await fetchDebtTransactions(debtId);
   };
 
+  const handleDeleteDebtTransaction = async (debtId: string, transactionId: string) => {
+    const updatedDebt = await deleteDebtTransaction(debtId, transactionId);
+    const updatedDebts = await fetchLocalDebts();
+    setDebts(updatedDebts);
+    return updatedDebt;
+  };
+
   const handleRestoreBackup = async (jsonStr: string) => {
     const res = await restoreFullBackupData(jsonStr);
     const [updatedAccounts, updatedTransactions, updatedDebts] = await Promise.all([
@@ -375,9 +405,10 @@ function AppContent() {
       (acc, item) => {
         if (item.type === 'income') {
           acc.income += item.amount;
-        } else {
+        } else if (item.type === 'expense') {
           acc.expense += item.amount;
         }
+        // Transfers move balance between user accounts without altering total expense/income
         return acc;
       },
       { income: 0, expense: 0 },
@@ -393,17 +424,48 @@ function AppContent() {
       setHasOverlayPermission(granted);
       if (!granted) {
         setBubbleEnabled(false);
+        await setLocalSetting('bubble_enabled_setting', '0');
         return;
       }
       await initializeSystemBubble();
       await setBubbleCurrencySymbol(currencySymbol);
       await showSystemBubble(width - 84, height * 0.5);
       setBubbleEnabled(true);
+      await setLocalSetting('bubble_enabled_setting', '1');
     } else {
       setBubbleEnabled(false);
+      await setLocalSetting('bubble_enabled_setting', '0');
       await hideSystemBubble();
       await stopSystemBubble();
     }
+  };
+
+  const handleUpdateBudget = async (budget: number) => {
+    setMonthlyBudget(budget);
+    await setLocalSetting('monthly_budget', String(budget));
+  };
+
+  const handleResetAllData = async () => {
+    await clearLocalData();
+    await seedLocalDataIfEmpty();
+    const [freshAccounts, freshTxs, freshDebts] = await Promise.all([
+      fetchLocalAccounts(),
+      fetchLocalTransactions(),
+      fetchLocalDebts(),
+    ]);
+    setAccounts(freshAccounts);
+    setTransactions(freshTxs);
+    setDebts(freshDebts);
+  };
+
+  const handleClearTransactionsOnly = async () => {
+    await clearLocalTransactionsOnly();
+    const [freshAccounts, freshTxs] = await Promise.all([
+      fetchLocalAccounts(),
+      fetchLocalTransactions(),
+    ]);
+    setAccounts(freshAccounts);
+    setTransactions(freshTxs);
   };
 
   const mergePendingTransactions = async (items: QuickTransaction[]) => {
@@ -486,14 +548,13 @@ function AppContent() {
         current.map(item => (item.id === account.id ? account : item)),
       );
       try {
-        const updated = await updateLocalAccount(account.id, {
+        await updateLocalAccount(account.id, {
           name: account.name,
           type: account.type,
           balance: account.balance,
         });
-        setAccounts(current =>
-          current.map(item => (item.id === updated.id ? updated : item)),
-        );
+        const fresh = await fetchLocalAccounts();
+        setAccounts(fresh);
       } catch {
         // keep local entry
       }
@@ -503,14 +564,13 @@ function AppContent() {
 
     setAccounts(current => [account, ...current]);
     try {
-      const created = await createLocalAccount({
+      await createLocalAccount({
         name: account.name,
         type: account.type,
         balance: account.balance,
       });
-      setAccounts(current =>
-        current.map(item => (item.id === account.id ? created : item)),
-      );
+      const fresh = await fetchLocalAccounts();
+      setAccounts(fresh);
     } catch {
       // keep local entry
     }
@@ -533,12 +593,13 @@ function AppContent() {
       }),
     );
     try {
-      const result = await deleteLocalAccount(account.id);
-      if (result.transactionIds.length) {
-        setTransactions(current =>
-          current.filter(item => !result.transactionIds.includes(item.id)),
-        );
-      }
+      await deleteLocalAccount(account.id);
+      const [freshAccounts, freshTxs] = await Promise.all([
+        fetchLocalAccounts(),
+        fetchLocalTransactions(),
+      ]);
+      setAccounts(freshAccounts);
+      setTransactions(freshTxs);
     } catch {
       // ignore db failures
     }
@@ -565,22 +626,44 @@ function AppContent() {
       };
 
       if (previous) {
-        const prevDelta =
-          previous.type === 'income' ? previous.amount : -previous.amount;
-        const prevAccountId =
-          previous.accountId ??
-          findAccountIdByDetails(updated, previous.accountName, previous.accountType);
-        if (prevAccountId) {
-          applyDelta(prevAccountId, -prevDelta);
+        if (previous.type === 'transfer') {
+          const prevSourceId =
+            previous.accountId ??
+            findAccountIdByDetails(updated, previous.accountName, previous.accountType);
+          const prevDestId =
+            previous.toAccountId ??
+            findAccountIdByDetails(updated, previous.toAccountName, previous.toAccountType);
+          if (prevSourceId) applyDelta(prevSourceId, previous.amount);
+          if (prevDestId) applyDelta(prevDestId, -previous.amount);
+        } else {
+          const prevDelta =
+            previous.type === 'income' ? previous.amount : -previous.amount;
+          const prevAccountId =
+            previous.accountId ??
+            findAccountIdByDetails(updated, previous.accountName, previous.accountType);
+          if (prevAccountId) {
+            applyDelta(prevAccountId, -prevDelta);
+          }
         }
       }
 
-      const nextDelta = entry.type === 'income' ? entry.amount : -entry.amount;
-      const nextAccountId =
-        entry.accountId ??
-        findAccountIdByDetails(updated, entry.accountName, entry.accountType);
-      if (nextAccountId) {
-        applyDelta(nextAccountId, nextDelta);
+      if (entry.type === 'transfer') {
+        const nextSourceId =
+          entry.accountId ??
+          findAccountIdByDetails(updated, entry.accountName, entry.accountType);
+        const nextDestId =
+          entry.toAccountId ??
+          findAccountIdByDetails(updated, entry.toAccountName, entry.toAccountType);
+        if (nextSourceId) applyDelta(nextSourceId, -entry.amount);
+        if (nextDestId) applyDelta(nextDestId, entry.amount);
+      } else {
+        const nextDelta = entry.type === 'income' ? entry.amount : -entry.amount;
+        const nextAccountId =
+          entry.accountId ??
+          findAccountIdByDetails(updated, entry.accountName, entry.accountType);
+        if (nextAccountId) {
+          applyDelta(nextAccountId, nextDelta);
+        }
       }
       return updated;
     });
@@ -612,6 +695,9 @@ function AppContent() {
           accountId: entry.accountId,
           accountName: entry.accountName,
           accountType: entry.accountType,
+          toAccountId: entry.toAccountId,
+          toAccountName: entry.toAccountName,
+          toAccountType: entry.toAccountType,
           createdAt: entry.createdAt,
           category: entry.category,
         });
@@ -620,13 +706,8 @@ function AppContent() {
             item.id === entry.id ? result.transaction : item,
           ),
         );
-        if (result.account) {
-          setAccounts(current =>
-            current.map(item =>
-              item.id === result.account!.id ? result.account! : item,
-            ),
-          );
-        }
+        const freshAccounts = await fetchLocalAccounts();
+        setAccounts(freshAccounts);
       }
     } catch {
       // keep local entry
@@ -638,29 +719,36 @@ function AppContent() {
     setTransactions(current => current.filter(item => item.id !== entry.id));
     setAccounts(current => {
       let updated = [...current];
-      const delta = entry.type === 'income' ? -entry.amount : entry.amount;
-      const accountId =
-        entry.accountId ??
-        findAccountIdByDetails(updated, entry.accountName, entry.accountType);
-      if (accountId) {
-        updated = updated.map(account =>
-          account.id === accountId
-            ? { ...account, balance: account.balance + delta }
-            : account,
+      const applyDelta = (accId: string, d: number) => {
+        updated = updated.map(a =>
+          a.id === accId ? { ...a, balance: a.balance + d } : a,
         );
+      };
+      if (entry.type === 'transfer') {
+        const srcId =
+          entry.accountId ??
+          findAccountIdByDetails(updated, entry.accountName, entry.accountType);
+        const dstId =
+          entry.toAccountId ??
+          findAccountIdByDetails(updated, entry.toAccountName, entry.toAccountType);
+        if (srcId) applyDelta(srcId, entry.amount);
+        if (dstId) applyDelta(dstId, -entry.amount);
+      } else {
+        const delta = entry.type === 'income' ? -entry.amount : entry.amount;
+        const accountId =
+          entry.accountId ??
+          findAccountIdByDetails(updated, entry.accountName, entry.accountType);
+        if (accountId) {
+          applyDelta(accountId, delta);
+        }
       }
       return updated;
     });
 
     try {
-      const result = await deleteLocalTransaction(entry.id);
-      if (result.account) {
-        setAccounts(current =>
-          current.map(item =>
-            item.id === result.account!.id ? result.account! : item,
-          ),
-        );
-      }
+      await deleteLocalTransaction(entry.id);
+      const freshAccounts = await fetchLocalAccounts();
+      setAccounts(freshAccounts);
     } catch {
       // ignore db failures
     }
@@ -668,7 +756,7 @@ function AppContent() {
     setQuickAddOpen(false);
     setActionModalTransaction(null);
 
-    const desc = entry.note || entry.category || (entry.type === 'income' ? 'Income' : 'Expense');
+    const desc = entry.note || entry.category || (entry.type === 'income' ? 'Income' : entry.type === 'transfer' ? 'Transfer' : 'Expense');
     setUndoSnackbar({
       visible: true,
       message: `🗑️ Deleted ${desc} (${currencySymbol}${entry.amount.toFixed(2)})`,
@@ -689,17 +777,15 @@ function AppContent() {
         accountId: entry.accountId,
         accountName: entry.accountName,
         accountType: entry.accountType,
+        toAccountId: entry.toAccountId,
+        toAccountName: entry.toAccountName,
+        toAccountType: entry.toAccountType,
         createdAt: entry.createdAt,
         category: entry.category,
       });
       setTransactions(current => [result.transaction, ...current]);
-      if (result.account) {
-        setAccounts(current =>
-          current.map(item =>
-            item.id === result.account!.id ? result.account! : item,
-          ),
-        );
-      }
+      const freshAccounts = await fetchLocalAccounts();
+      setAccounts(freshAccounts);
     } catch (err) {
       console.warn('Failed to restore deleted transaction:', err);
     }
@@ -714,15 +800,15 @@ function AppContent() {
         accountId: item.accountId,
         accountName: item.accountName,
         accountType: item.accountType,
+        toAccountId: item.toAccountId,
+        toAccountName: item.toAccountName,
+        toAccountType: item.toAccountType,
         createdAt: new Date().toISOString(),
         category: item.category,
       });
       setTransactions(current => [result.transaction, ...current]);
-      if (result.account) {
-        setAccounts(current =>
-          current.map(a => (a.id === result.account!.id ? result.account! : a)),
-        );
-      }
+      const freshAccounts = await fetchLocalAccounts();
+      setAccounts(freshAccounts);
       setActionModalTransaction(null);
       setUndoSnackbar({
         visible: true,
@@ -745,6 +831,7 @@ function AppContent() {
           onAddRepayment={handleAddRepayment}
           onAddDebtAdditional={handleAddDebtAdditional}
           onDeleteDebt={handleDeleteDebt}
+          onDeleteDebtTransaction={handleDeleteDebtTransaction}
           onFetchTransactions={handleFetchDebtTransactions}
         />
       ) : activeScreen === 'analysis' ? (
@@ -776,6 +863,10 @@ function AppContent() {
           }}
           onExportBackup={exportFullBackupData}
           onRestoreBackup={handleRestoreBackup}
+          monthlyBudget={monthlyBudget}
+          onUpdateBudget={handleUpdateBudget}
+          onResetAllData={handleResetAllData}
+          onClearTransactionsOnly={handleClearTransactionsOnly}
         />
       ) : (
         <>
@@ -828,6 +919,90 @@ function AppContent() {
                     </View>
                   </View>
                 </View>
+
+                {monthlyBudget > 0 && (
+                  <View style={styles.budgetCard}>
+                    <View style={styles.budgetTopRow}>
+                      <View style={styles.budgetLabelRow}>
+                        <Text style={styles.budgetIconText}>🎯</Text>
+                        <Text style={styles.budgetTitleText}>Monthly Budget</Text>
+                      </View>
+                      <View
+                        style={[
+                          styles.budgetStatusPill,
+                          {
+                            backgroundColor:
+                              summary.expense > monthlyBudget
+                                ? 'rgba(239, 68, 68, 0.2)'
+                                : summary.expense / monthlyBudget > 0.8
+                                  ? 'rgba(245, 158, 11, 0.2)'
+                                  : 'rgba(16, 185, 129, 0.2)',
+                            borderColor:
+                              summary.expense > monthlyBudget
+                                ? '#EF4444'
+                                : summary.expense / monthlyBudget > 0.8
+                                  ? '#F59E0B'
+                                  : '#10B981',
+                          },
+                        ]}
+                      >
+                        <Text
+                          style={[
+                            styles.budgetStatusPillText,
+                            {
+                              color:
+                                summary.expense > monthlyBudget
+                                  ? '#F87171'
+                                  : summary.expense / monthlyBudget > 0.8
+                                    ? '#FBBF24'
+                                    : '#6EE7B7',
+                            },
+                          ]}
+                        >
+                          {summary.expense > monthlyBudget
+                            ? 'Over Budget'
+                            : `${Math.round((summary.expense / monthlyBudget) * 100)}% Used`}
+                        </Text>
+                      </View>
+                    </View>
+
+                    <View style={styles.budgetProgressBarBg}>
+                      <View
+                        style={[
+                          styles.budgetProgressBarFill,
+                          {
+                            width: `${Math.min(100, Math.round((summary.expense / monthlyBudget) * 100))}%`,
+                            backgroundColor:
+                              summary.expense > monthlyBudget
+                                ? '#EF4444'
+                                : summary.expense / monthlyBudget > 0.8
+                                  ? '#F59E0B'
+                                  : '#10B981',
+                          },
+                        ]}
+                      />
+                    </View>
+
+                    <View style={styles.budgetFooterRow}>
+                      <Text style={styles.budgetSpentText}>
+                        Spent {formatCurrency(summary.expense)} of {formatCurrency(monthlyBudget)}
+                      </Text>
+                      <Text
+                        style={[
+                          styles.budgetRemainingText,
+                          {
+                            color:
+                              summary.expense > monthlyBudget ? '#F87171' : '#A7F3D0',
+                          },
+                        ]}
+                      >
+                        {summary.expense > monthlyBudget
+                          ? `+${formatCurrency(summary.expense - monthlyBudget)} over`
+                          : `${formatCurrency(monthlyBudget - summary.expense)} left`}
+                      </Text>
+                    </View>
+                  </View>
+                )}
 
                 <View style={styles.sectionHeader}>
                   <View style={styles.sectionTitleWithBadge}>
@@ -914,11 +1089,40 @@ function AppContent() {
                     </Text>
                   </Pressable>
                 </View>
+
+                {/* Filter Pills for Transactions */}
+                <View style={styles.filterPillsRow}>
+                  {(['all', 'expense', 'income', 'transfer'] as const).map(tab => (
+                    <Pressable
+                      key={tab}
+                      style={[
+                        styles.filterPill,
+                        transactionTypeFilter === tab && styles.filterPillActive,
+                      ]}
+                      onPress={() => setTransactionTypeFilter(tab)}
+                    >
+                      <Text
+                        style={[
+                          styles.filterPillText,
+                          transactionTypeFilter === tab && styles.filterPillTextActive,
+                        ]}
+                      >
+                        {tab === 'all'
+                          ? `All (${transactionTypeCounts.all})`
+                          : tab === 'expense'
+                            ? `Expenses (${transactionTypeCounts.expense})`
+                            : tab === 'income'
+                              ? `Income (${transactionTypeCounts.income})`
+                              : `Transfers (${transactionTypeCounts.transfer})`}
+                      </Text>
+                    </Pressable>
+                  ))}
+                </View>
               </View>
             }
             ListEmptyComponent={
               <Text style={styles.emptyText}>
-                No transactions {showAllRecent ? 'recorded' : 'this month'}.
+                No {transactionTypeFilter !== 'all' ? `${transactionTypeFilter} ` : ''}transactions {showAllRecent ? 'recorded' : 'this month'}.
               </Text>
             }
             renderItem={({ item }) => (
@@ -1298,6 +1502,34 @@ const styles = StyleSheet.create({
     fontWeight: '800',
     color: '#6EE7B7',
   },
+  filterPillsRow: {
+    flexDirection: 'row',
+    paddingHorizontal: 20,
+    gap: 8,
+    marginBottom: 12,
+    flexWrap: 'wrap',
+  },
+  filterPill: {
+    paddingHorizontal: 12,
+    paddingVertical: 6,
+    borderRadius: 14,
+    backgroundColor: '#1E2140',
+    borderWidth: 1,
+    borderColor: 'rgba(255, 255, 255, 0.12)',
+  },
+  filterPillActive: {
+    backgroundColor: '#4E7CFF',
+    borderColor: '#4E7CFF',
+  },
+  filterPillText: {
+    fontSize: 11,
+    fontWeight: '600',
+    color: 'rgba(255, 255, 255, 0.65)',
+  },
+  filterPillTextActive: {
+    color: '#FFFFFF',
+    fontWeight: '700',
+  },
   permissionModalOverlay: {
     flex: 1,
     backgroundColor: 'rgba(0, 0, 0, 0.75)',
@@ -1500,6 +1732,69 @@ const styles = StyleSheet.create({
   emptyText: {
     color: 'rgba(255,255,255,0.9)',
     marginTop: 12,
+  },
+  budgetCard: {
+    backgroundColor: '#23274F',
+    borderRadius: 18,
+    padding: 16,
+    marginBottom: 18,
+    borderWidth: 1,
+    borderColor: 'rgba(255, 255, 255, 0.1)',
+  },
+  budgetTopRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    marginBottom: 10,
+  },
+  budgetLabelRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+  },
+  budgetIconText: {
+    fontSize: 16,
+  },
+  budgetTitleText: {
+    fontSize: 13,
+    fontWeight: '700',
+    color: '#FFFFFF',
+  },
+  budgetStatusPill: {
+    paddingHorizontal: 10,
+    paddingVertical: 3,
+    borderRadius: 12,
+    borderWidth: 1,
+  },
+  budgetStatusPillText: {
+    fontSize: 11,
+    fontWeight: '800',
+  },
+  budgetProgressBarBg: {
+    height: 8,
+    backgroundColor: 'rgba(255, 255, 255, 0.08)',
+    borderRadius: 4,
+    overflow: 'hidden',
+    marginVertical: 4,
+  },
+  budgetProgressBarFill: {
+    height: '100%',
+    borderRadius: 4,
+  },
+  budgetFooterRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    marginTop: 8,
+  },
+  budgetSpentText: {
+    fontSize: 11.5,
+    fontWeight: '600',
+    color: 'rgba(255, 255, 255, 0.65)',
+  },
+  budgetRemainingText: {
+    fontSize: 11.5,
+    fontWeight: '700',
   },
 });
 

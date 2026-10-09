@@ -51,7 +51,7 @@ class SystemBubbleModule(private val reactContext: ReactApplicationContext) :
     intent.action = SystemBubbleService.ACTION_SHOW
     intent.putExtra(SystemBubbleService.EXTRA_X, x)
     intent.putExtra(SystemBubbleService.EXTRA_Y, y)
-    reactContext.startService(intent)
+    startBubbleService(intent)
   }
 
   @ReactMethod

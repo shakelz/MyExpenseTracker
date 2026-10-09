@@ -33,6 +33,7 @@ type LoansScreenProps = {
   onAddRepayment: (debtId: string, amount: number, note?: string) => Promise<void>;
   onAddDebtAdditional?: (debtId: string, amount: number, note?: string) => Promise<void>;
   onDeleteDebt: (debtId: string) => Promise<void>;
+  onDeleteDebtTransaction?: (debtId: string, transactionId: string) => Promise<Debt | null>;
   onRefreshDebts?: () => Promise<void>;
   onFetchTransactions: (debtId: string) => Promise<DebtTransaction[]>;
 };
@@ -45,6 +46,7 @@ export default function LoansScreen({
   onAddRepayment,
   onAddDebtAdditional,
   onDeleteDebt,
+  onDeleteDebtTransaction,
   onFetchTransactions,
 }: LoansScreenProps) {
   const safeAreaInsets = useSafeAreaInsets();
@@ -303,9 +305,19 @@ export default function LoansScreen({
 
   const handleShareWhatsApp = (debt: Debt) => {
     const isLent = debt.type === 'lent';
-    const message = isLent
-      ? `Assalam-o-Alaikum ${debt.personName}, gentle reminder regarding remaining balance of ${formatCurrency(debt.remainingAmount)}${debt.note ? ` for "${debt.note}"` : ''}. Thank you! (via Fiscus)`
-      : `Assalam-o-Alaikum ${debt.personName}, this is regarding the amount of ${formatCurrency(debt.remainingAmount)} I owe you. I will clear it shortly. Thank you! (via Fiscus)`;
+    const isSettled = debt.status === 'settled' || debt.remainingAmount <= 0;
+
+    let message = '';
+    if (isSettled) {
+      message = isLent
+        ? `Assalam-o-Alaikum ${debt.personName}, confirming that the loan of ${formatCurrency(debt.amount)} has been fully settled and cleared. Thank you! (via Fiscus)`
+        : `Assalam-o-Alaikum ${debt.personName}, confirming that the amount of ${formatCurrency(debt.amount)} has been fully paid and cleared. Thank you! (via Fiscus)`;
+    } else {
+      const dueInfo = debt.dueDate ? ` (Due Date: ${debt.dueDate})` : '';
+      message = isLent
+        ? `Assalam-o-Alaikum ${debt.personName}, gentle reminder regarding remaining balance of ${formatCurrency(debt.remainingAmount)}${debt.note ? ` for "${debt.note}"` : ''}${dueInfo}. Thank you! (via Fiscus)`
+        : `Assalam-o-Alaikum ${debt.personName}, this is regarding the amount of ${formatCurrency(debt.remainingAmount)} I owe you${dueInfo}. I will clear it shortly. Thank you! (via Fiscus)`;
+    }
 
     const phoneClean = debt.phone ? debt.phone.replace(/[^0-9+]/g, '') : '';
     const url = phoneClean
@@ -324,6 +336,38 @@ export default function LoansScreen({
         Alert.alert('Error', 'Unable to open WhatsApp.');
       });
   };
+
+  const handleDeleteTransactionItem = (item: DebtTransaction) => {
+    if (!selectedDebt) return;
+    const isAdditional = item.type === 'additional';
+    const actionLabel = isAdditional ? 'additional loan amount' : 'repayment installment';
+    Alert.alert(
+      'Delete Transaction',
+      `Delete this ${actionLabel} of ${formatCurrency(item.amount)}? The remaining balance will be automatically recalculated.`,
+      [
+        { text: 'Cancel', style: 'cancel' },
+        {
+          text: 'Delete',
+          style: 'destructive',
+          onPress: async () => {
+            try {
+              if (onDeleteDebtTransaction) {
+                const updatedDebt = await onDeleteDebtTransaction(selectedDebt.id, item.id);
+                if (updatedDebt) {
+                  setSelectedDebt(updatedDebt);
+                }
+              }
+              const freshHistory = await onFetchTransactions(selectedDebt.id);
+              setHistoryTransactions(freshHistory);
+            } catch (err: any) {
+              Alert.alert('Error', `Failed to delete transaction: ${err?.message || 'Unknown error'}`);
+            }
+          },
+        },
+      ],
+    );
+  };
+
 
   const handleDelete = (debt: Debt) => {
     Alert.alert(
@@ -1060,30 +1104,73 @@ export default function LoansScreen({
               <FlatList
                 data={historyTransactions}
                 keyExtractor={item => item.id}
-                renderItem={({ item }) => (
-                  <View style={styles.historyItemRow}>
-                    <View style={styles.historyIconBadge}>
-                      <Text style={{ fontSize: 14 }}>💵</Text>
+                renderItem={({ item }) => {
+                  const isAdditional = item.type === 'additional';
+                  return (
+                    <View style={styles.historyItemRow}>
+                      <View
+                        style={[
+                          styles.historyIconBadge,
+                          isAdditional && { backgroundColor: 'rgba(245, 158, 11, 0.15)' },
+                        ]}
+                      >
+                        <Text style={{ fontSize: 14 }}>{isAdditional ? '➕' : '💵'}</Text>
+                      </View>
+                      <View style={styles.historyItemInfo}>
+                        <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6 }}>
+                          <Text style={styles.historyItemNote} numberOfLines={1}>
+                            {item.note || (isAdditional ? 'Additional Amount' : 'Repayment / Installment')}
+                          </Text>
+                          <View
+                            style={[
+                              styles.historyTypeTag,
+                              isAdditional ? styles.historyTypeTagAdd : styles.historyTypeTagRepay,
+                            ]}
+                          >
+                            <Text
+                              style={[
+                                styles.historyTypeTagText,
+                                isAdditional ? { color: '#fbbf24' } : { color: '#34d399' },
+                              ]}
+                            >
+                              {isAdditional
+                                ? (selectedDebt?.type === 'lent' ? 'Diye Aur' : 'Liye Aur')
+                                : (selectedDebt?.type === 'lent' ? 'Vasooli' : 'Adaigi')}
+                            </Text>
+                          </View>
+                        </View>
+                        <Text style={styles.historyItemDate}>
+                          {new Date(item.createdAt).toLocaleDateString('en-GB', {
+                            day: '2-digit',
+                            month: 'short',
+                            year: 'numeric',
+                            hour: '2-digit',
+                            minute: '2-digit',
+                          })}
+                        </Text>
+                      </View>
+                      <View style={{ alignItems: 'flex-end', justifyContent: 'center' }}>
+                        <Text
+                          style={[
+                            styles.historyItemAmount,
+                            isAdditional ? { color: '#f59e0b' } : { color: '#10b981' },
+                          ]}
+                        >
+                          {isAdditional ? `+${formatCurrency(item.amount)}` : `-${formatCurrency(item.amount)}`}
+                        </Text>
+                        {onDeleteDebtTransaction && (
+                          <Pressable
+                            hitSlop={8}
+                            onPress={() => handleDeleteTransactionItem(item)}
+                            style={styles.historyDeleteBtn}
+                          >
+                            <Text style={styles.historyDeleteBtnText}>🗑 Delete</Text>
+                          </Pressable>
+                        )}
+                      </View>
                     </View>
-                    <View style={styles.historyItemInfo}>
-                      <Text style={styles.historyItemNote}>
-                        {item.note || 'Repayment / Installment'}
-                      </Text>
-                      <Text style={styles.historyItemDate}>
-                        {new Date(item.createdAt).toLocaleDateString('en-GB', {
-                          day: '2-digit',
-                          month: 'short',
-                          year: 'numeric',
-                          hour: '2-digit',
-                          minute: '2-digit',
-                        })}
-                      </Text>
-                    </View>
-                    <Text style={styles.historyItemAmount}>
-                      +{formatCurrency(item.amount)}
-                    </Text>
-                  </View>
-                )}
+                  );
+                }}
               />
             )}
 
@@ -1795,6 +1882,35 @@ const styles = StyleSheet.create({
     fontSize: 14,
     fontWeight: '700',
     color: '#10B981',
+  },
+  historyTypeTag: {
+    paddingHorizontal: 6,
+    paddingVertical: 1,
+    borderRadius: 4,
+  },
+  historyTypeTagAdd: {
+    backgroundColor: 'rgba(245, 158, 11, 0.15)',
+    borderWidth: 1,
+    borderColor: 'rgba(245, 158, 11, 0.4)',
+  },
+  historyTypeTagRepay: {
+    backgroundColor: 'rgba(16, 185, 129, 0.15)',
+    borderWidth: 1,
+    borderColor: 'rgba(16, 185, 129, 0.4)',
+  },
+  historyTypeTagText: {
+    fontSize: 10,
+    fontWeight: '700',
+  },
+  historyDeleteBtn: {
+    marginTop: 4,
+    paddingHorizontal: 4,
+    paddingVertical: 2,
+  },
+  historyDeleteBtnText: {
+    fontSize: 10,
+    color: '#F87171',
+    fontWeight: '600',
   },
   emptyHistoryWrap: {
     paddingVertical: 20,
